@@ -1,0 +1,86 @@
+/* SwitchLM — instrument-panel design tokens.
+ * Light is the root; dark overrides auto-follow the OS via prefers-color-scheme.
+ * Naive UI consumes the same values via src/styles/theme.ts (GlobalThemeOverrides). */
+:root {
+  /* surfaces */
+  --sl-paper: #f5f6f8;
+  --sl-panel: #ffffff;
+  --sl-panel-2: #fafbfc; /* recessed / secondary surface */
+  --sl-ink: #1b1f24; /* primary text */
+  --sl-text-2: #5c6370; /* muted text */
+  --sl-text-3: #8b949e; /* faint / labels */
+  --sl-line: #e1e4e8; /* hairline borders */
+  --sl-line-2: #edf0f3;
+  /* signal */
+  --sl-accent: #3b5bdb; /* cobalt — routed / primary action */
+  --sl-accent-hover: #3355c9;
+  --sl-accent-weak: #eaf0fe;
+  --sl-cool: #d97706; /* cooling amber */
+  --sl-cool-weak: #fef3e2;
+  --sl-trip: #dc2626; /* tripped / error red */
+  --sl-trip-weak: #fdecec;
+  --sl-ok: #1f9d63; /* healthy (used sparingly) */
+  /* type */
+  --sl-font-sans: "IBM Plex Sans", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --sl-font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* shape */
+  --sl-radius: 8px;
+  --sl-radius-sm: 5px;
+  --sl-space: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sl-paper: #0e1116;
+    --sl-panel: #161b22;
+    --sl-panel-2: #1c232c;
+    --sl-ink: #e6edf3;
+    --sl-text-2: #9aa6b2;
+    --sl-text-3: #6b7785;
+    --sl-line: #30363d;
+    --sl-line-2: #232a31;
+    --sl-accent: #5b7cfa;
+    --sl-accent-hover: #6e8cfb;
+    --sl-accent-weak: #1a2340;
+    --sl-cool: #f0b429;
+    --sl-cool-weak: #2a2113;
+    --sl-trip: #ff6b6b;
+    --sl-trip-weak: #2a1414;
+    --sl-ok: #3fd17f;
+  }
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+body {
+  background: var(--sl-paper);
+  color: var(--sl-ink);
+  font-family: var(--sl-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+/* monospace for all data identifiers / numbers / urls */
+.mono {
+  font-family: var(--sl-font-mono);
+}
+/* drag-to-reorder lists (vuedraggable containers) */
+.drag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.drag-handle {
+  cursor: grab;
+  color: var(--sl-text-3);
+  user-select: none;
+  font-size: 15px;
+  line-height: 1;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}

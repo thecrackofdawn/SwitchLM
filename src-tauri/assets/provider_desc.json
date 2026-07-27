@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "provider_id": "zhipu",
+      "models": [
+        { "upstream_model_id": "glm-5.2", "context_size": 1000000 },
+        { "upstream_model_id": "glm-5.1", "context_size": 200000 },
+        { "upstream_model_id": "glm-5", "context_size": 200000 },
+        { "upstream_model_id": "glm-5-turbo", "context_size": 200000 },
+        { "upstream_model_id": "glm-4.7", "context_size": 200000 },
+        { "upstream_model_id": "glm-4.7-flashx", "context_size": 200000 },
+        { "upstream_model_id": "glm-4.7-flash", "context_size": 200000 },
+        { "upstream_model_id": "glm-4.6", "context_size": 200000 },
+        { "upstream_model_id": "glm-4.5-air", "context_size": 128000 },
+        { "upstream_model_id": "glm-4.5-airx", "context_size": 128000 },
+        { "upstream_model_id": "glm-4.5-flash", "context_size": 128000 },
+        { "upstream_model_id": "glm-4-long", "context_size": 1000000 },
+        { "upstream_model_id": "glm-4-flashx-250414", "context_size": 128000 },
+        { "upstream_model_id": "glm-4-flash-250414", "context_size": 128000 },
+        { "upstream_model_id": "codegeex-4", "context_size": 128000 }
+      ]
+    },
+    {
+      "provider_id": "deepseek",
+      "models": [
+        { "upstream_model_id": "deepseek-v4-flash", "context_size": 1000000 },
+        { "upstream_model_id": "deepseek-v4-pro", "context_size": 1000000 }
+      ]
+    },
+    {
+      "provider_id": "volcengine-agent",
+      "models": [
+        { "upstream_model_id": "doubao-seed-evolving", "context_size": 1000000 },
+        { "upstream_model_id": "doubao-seed-2.1-turbo", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-pro", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-lite", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-code", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-mini", "context_size": 256000 },
+        { "upstream_model_id": "deepseek-v4-pro", "context_size": 1000000 },
+        { "upstream_model_id": "deepseek-v4-flash", "context_size": 1000000 },
+        { "upstream_model_id": "kimi-k3", "context_size": 1000000 },
+        { "upstream_model_id": "kimi-k2.7-code", "context_size": 256000 },
+        { "upstream_model_id": "kimi-k2.6", "context_size": 256000 },
+        { "upstream_model_id": "minimax-m3", "context_size": 512000 },
+        { "upstream_model_id": "minimax-m2.7", "context_size": 200000 },
+        { "upstream_model_id": "glm-5.2", "context_size": 1000000 }
+      ]
+    },
+    {
+      "provider_id": "volcengine-coding",
+      "models": [
+        { "upstream_model_id": "auto", "context_size": 1000000 },
+        { "upstream_model_id": "doubao-seed-2.1-turbo", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-code", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-code", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-pro", "context_size": 256000 },
+        { "upstream_model_id": "doubao-seed-2.0-lite", "context_size": 256000 },
+        { "upstream_model_id": "deepseek-v4-pro", "context_size": 1000000 },
+        { "upstream_model_id": "deepseek-v4-flash", "context_size": 1000000 },
+        { "upstream_model_id": "kimi-k2.7-code", "context_size": 256000 },
+        { "upstream_model_id": "kimi-k2.6", "context_size": 256000 },
+        { "upstream_model_id": "minimax-m3", "context_size": 512000 },
+        { "upstream_model_id": "minimax-m2.7", "context_size": 200000 },
+        { "upstream_model_id": "glm-5.2", "context_size": 1000000 }
+      ]
+    },
+    {
+      "provider_id": "qianwen-token",
+      "models": [
+        { "upstream_model_id": "qwen3.8-max", "context_size": 1000000 },
+        { "upstream_model_id": "qwen3.8-max-preview", "context_size": 1000000 },
+        { "upstream_model_id": "qwen3.7-max", "context_size": 1000000 },
+        { "upstream_model_id": "qwen3.7-plus", "context_size": 1000000 },
+        { "upstream_model_id": "qwen3.6-flash", "context_size": 128000 },
+        { "upstream_model_id": "deepseek-v4-pro", "context_size": 1048576 },
+        { "upstream_model_id": "deepseek-v4-flash-0731", "context_size": 1048576 },
+        { "upstream_model_id": "glm-5.2", "context_size": 1000000 }
+      ]
+    }
+  ]
+}

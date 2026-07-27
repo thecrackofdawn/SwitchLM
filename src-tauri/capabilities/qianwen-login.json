@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "qianwen-login",
+  "description": "Capability for the Qianwen login window (loads external HTTPS only; no app IPC)",
+  "windows": ["qianwen-login"],
+  "permissions": ["core:default"]
+}

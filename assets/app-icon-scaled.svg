@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="#141622" />
+      <stop offset="100%" stop-color="#090a0f" />
+    </radialGradient>
+
+    <!-- Main Path Cyan-to-Blue Gradient -->
+    <linearGradient id="mainPathGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00e5ff" />
+      <stop offset="50%" stop-color="#2979ff" />
+      <stop offset="100%" stop-color="#00b0ff" />
+    </linearGradient>
+
+    <!-- Node Gradients -->
+    <radialGradient id="topNodeGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff007f" />
+      <stop offset="100%" stop-color="#ab003c" />
+    </radialGradient>
+
+    <radialGradient id="bottomNodeGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00e5ff" />
+      <stop offset="100%" stop-color="#0081cb" />
+    </radialGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glowCyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="15" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glowMagenta" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Layer -->
+  <rect width="500" height="500" rx="40" fill="url(#bgGlow)" />
+
+  <!-- Dashed Diagonal Guide Lines -->
+  <line x1="100" y1="360" x2="400" y2="140" stroke="#333a4a" stroke-width="2" stroke-dasharray="6,6" opacity="0.6" />
+  <line x1="140" y1="180" x2="360" y2="320" stroke="#333a4a" stroke-width="2" stroke-dasharray="6,6" opacity="0.4" />
+
+  <!-- Glowing S-Curve Body -->
+  <!-- Back Glow -->
+  <path d="M 110,130 C 270,10 380,180 250,250 C 120,320 230,490 390,370" 
+        fill="none" stroke="#00e5ff" stroke-width="50" stroke-linecap="round" opacity="0.3" filter="url(#glowCyan)" />
+
+  <!-- Main S-Stroke -->
+  <path d="M 110,130 C 270,10 380,180 250,250 C 120,320 230,490 390,370" 
+        fill="none" stroke="url(#mainPathGrad)" stroke-width="44" stroke-linecap="round" />
+
+  <!-- Top-Left Pink Node (Glowing) -->
+  <g filter="url(#glowMagenta)">
+    <circle cx="110" cy="130" r="38" fill="url(#topNodeGrad)" />
+    <circle cx="110" cy="130" r="16" fill="#ffffff" />
+  </g>
+
+  <!-- Bottom-Right Cyan Node (Glowing) -->
+  <g filter="url(#glowCyan)">
+    <circle cx="390" cy="370" r="38" fill="url(#bottomNodeGrad)" />
+    <circle cx="390" cy="370" r="16" fill="#ffffff" />
+  </g>
+
+  <!-- Center Eye Node -->
+  <circle cx="250" cy="250" r="42" fill="#1e222d" stroke="#525b70" stroke-width="3" />
+  <circle cx="250" cy="250" r="28" fill="#ffffff" />
+  <circle cx="250" cy="250" r="16" fill="#090a0f" />
+
+  <!-- Accent Triangles -->
+  <!-- Top-Right Cyan Triangle -->
+  <polygon points="360,70 400,100 360,120" fill="#00e5ff" />
+  <!-- Bottom-Left Pink Triangle -->
+  <polygon points="110,410 150,380 150,430" fill="#ff007f" />
+
+  <!-- Corner Sparkle Accent -->
+  <path d="M 430,430 Q 440,430 440,420 Q 440,430 450,430 Q 440,430 440,440 Q 440,430 430,430 Z" fill="#78909c" opacity="0.8" />
+</svg>
