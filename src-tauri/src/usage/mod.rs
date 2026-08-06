@@ -21,7 +21,6 @@ pub use tiers::{QuotaTier, TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT, TIER_MONTHLY};
 /// breaker to set `recover_at` when a model trips (spec §6.3).
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct UsageSnapshot {
-    pub used: Option<f64>,
     pub total: Option<f64>,
     pub remaining: Option<f64>,
     /// Package/quota window reset time (epoch secs). Feeds the breaker's `recover_at`.
@@ -96,10 +95,10 @@ pub(crate) fn iso_to_epoch_secs(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
 }
 
-/// Build a `UsageSnapshot` from parsed `QuotaTier`s: the first tier drives the primary
-/// `used`/`reset_at` (tray + Dashboard single-value display); every tier is surfaced
-/// structurally in `tiers` for the Usage page's per-window breakdown. `raw_summary` stays `None`
-/// (the breakdown is structural, not a raw fallback).
+/// Build a `UsageSnapshot` from parsed `QuotaTier`s: the first tier drives `total`/`remaining`/
+/// `reset_at` (breaker + consumption math); display-layer primary selection is via `primary_used`
+/// (5h -> 周 -> 月). Every tier is surfaced structurally in `tiers` for the Usage page's per-window
+/// breakdown. `raw_summary` stays `None` (the breakdown is structural, not a raw fallback).
 pub(crate) fn snapshot_from_tiers(tiers: &[QuotaTier], plan: &Option<String>) -> UsageSnapshot {
     let primary = tiers.first();
     let used = primary.map(|t| t.utilization);
@@ -117,7 +116,6 @@ pub(crate) fn snapshot_from_tiers(tiers: &[QuotaTier], plan: &Option<String>) ->
         })
         .collect();
     UsageSnapshot {
-        used,
         total,
         remaining,
         reset_at,
@@ -128,6 +126,22 @@ pub(crate) fn snapshot_from_tiers(tiers: &[QuotaTier], plan: &Option<String>) ->
         billing_model: "plan".into(),
         plan_info: None,
     }
+}
+
+/// plan 主值窗口的选取顺序：最紧、最可操作的窗口优先。
+const PRIMARY_WINDOW_ORDER: &[&str] = &[TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT, TIER_MONTHLY];
+
+/// plan 账号的主已用百分比：按 5h → 周 → 月 取首个有具体值的窗口，连同窗口名一起返回
+/// （供展示层标注窗口）。无任何窗口有值时返回 `None`（账号从单值展示中隐藏）。
+pub fn primary_used(tiers: &[UsageTier]) -> Option<(f64, &'static str)> {
+    for &window in PRIMARY_WINDOW_ORDER {
+        if let Some(t) = tiers.iter().find(|t| t.window == window) {
+            if let Some(pct) = t.used_pct {
+                return Some((pct, window));
+            }
+        }
+    }
+    None
 }
 
 /// 套餐额度查询结果
@@ -259,7 +273,7 @@ mod tests {
         let c = UsageCache::new(60);
         assert!(c.get("zhipu", 1000).is_none());
         c.set("zhipu", snap(50.0), 1000);
-        assert_eq!(c.get("zhipu", 1059).map(|s| s.used), Some(Some(50.0)));
+        assert_eq!(c.get("zhipu", 1059).map(|s| s.remaining), Some(Some(50.0)));
     }
 
     #[test]
@@ -275,6 +289,44 @@ mod tests {
         c.set("zhipu", snap(50.0), 1000);
         c.invalidate("zhipu");
         assert!(c.get("zhipu", 1000).is_none());
+    }
+
+    #[test]
+    fn primary_used_picks_five_hour_first() {
+        let tiers = vec![
+            UsageTier { window: TIER_FIVE_HOUR.to_string(), used_pct: Some(80.0), reset_at: None },
+            UsageTier { window: TIER_WEEKLY_LIMIT.to_string(), used_pct: Some(40.0), reset_at: None },
+        ];
+        assert_eq!(primary_used(&tiers), Some((80.0, TIER_FIVE_HOUR)));
+    }
+
+    #[test]
+    fn primary_used_falls_back_to_weekly_when_no_five_hour() {
+        // 千问 regression：5h 缺、周档有 -> 周档为主值。
+        let tiers = vec![
+            UsageTier { window: TIER_FIVE_HOUR.to_string(), used_pct: None, reset_at: None },
+            UsageTier { window: TIER_WEEKLY_LIMIT.to_string(), used_pct: Some(9.0), reset_at: None },
+        ];
+        assert_eq!(primary_used(&tiers), Some((9.0, TIER_WEEKLY_LIMIT)));
+    }
+
+    #[test]
+    fn primary_used_falls_back_to_monthly() {
+        let tiers = vec![
+            UsageTier { window: TIER_FIVE_HOUR.to_string(), used_pct: None, reset_at: None },
+            UsageTier { window: TIER_WEEKLY_LIMIT.to_string(), used_pct: None, reset_at: None },
+            UsageTier { window: TIER_MONTHLY.to_string(), used_pct: Some(10.0), reset_at: None },
+        ];
+        assert_eq!(primary_used(&tiers), Some((10.0, TIER_MONTHLY)));
+    }
+
+    #[test]
+    fn primary_used_none_when_no_window_has_value() {
+        let tiers = vec![
+            UsageTier { window: TIER_FIVE_HOUR.to_string(), used_pct: None, reset_at: None },
+        ];
+        assert_eq!(primary_used(&tiers), None);
+        assert_eq!(primary_used(&[]), None);
     }
 
     #[test]
@@ -298,7 +350,6 @@ mod tests {
 
     fn snap(used: f64) -> UsageSnapshot {
         UsageSnapshot {
-            used: Some(used),
             total: Some(100.0),
             remaining: Some(100.0 - used),
             reset_at: None,

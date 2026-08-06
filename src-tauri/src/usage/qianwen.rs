@@ -77,7 +77,6 @@ fn map_usage(payload: &serde_json::Value) -> Result<UsageSnapshot, UsageError> {
         UsageTier { window: TIER_WEEKLY_LIMIT.to_string(), used_pct: per1w_used.map(pct), reset_at: per1w_reset },
     ];
     Ok(UsageSnapshot {
-        used: None,
         total: None,
         remaining: None,
         reset_at: per1w_reset,

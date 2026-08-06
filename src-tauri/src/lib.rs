@@ -125,6 +125,7 @@ pub fn run() {
                 server_handle: Mutex::new(None),
                 bind_error: Mutex::new(None),
                 polling_handle: Mutex::new(None),
+                last_served_provider: Mutex::new(None),
             });
 
             let state_for_server = state.clone();

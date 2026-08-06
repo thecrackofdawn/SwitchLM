@@ -292,7 +292,6 @@ impl UsageProvider for ZhipuUsageProvider {
         if tiers.is_empty() {
             // No TOKENS_LIMIT in window: best-effort raw fallback so the UI can show the payload.
             return Ok(UsageSnapshot {
-                used: None,
                 total: None,
                 remaining: None,
                 reset_at: None,
@@ -436,7 +435,7 @@ mod tests {
             .query(Some("sk-test"), None, &mock.uri())
             .await
             .unwrap();
-        assert_eq!(snap.used, Some(42.0));
+        assert_eq!(snap.tiers[0].used_pct, Some(42.0));
         assert_eq!(snap.total, Some(100.0));
         assert_eq!(snap.remaining, Some(58.0));
         assert_eq!(snap.reset_at, Some(1_700_000_000));
@@ -473,7 +472,6 @@ mod tests {
             .mount(&mock)
             .await;
         let snap = ZhipuUsageProvider.query(Some("sk"), None, &mock.uri()).await.unwrap();
-        assert_eq!(snap.used, None);
         assert!(snap.raw_summary.is_some());
     }
 
@@ -597,7 +595,7 @@ mod tests {
             .mount(&mock)
             .await;
         let snap = ZhipuUsageProvider.query(Some("sk-test"), None, &mock.uri()).await.unwrap();
-        assert_eq!(snap.used, Some(42.0)); // usage tiers intact
+        assert_eq!(snap.tiers[0].used_pct, Some(42.0)); // usage tiers intact
         assert_eq!(snap.plan_info, None); // subscription failed -> no plan_info
     }
 }

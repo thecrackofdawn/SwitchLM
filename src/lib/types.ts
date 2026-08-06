@@ -89,7 +89,6 @@ export interface PlanInfo {
 }
 
 export interface UsageSnapshot {
-  used?: number | null;
   total?: number | null;
   remaining?: number | null;
   reset_at?: number | null;

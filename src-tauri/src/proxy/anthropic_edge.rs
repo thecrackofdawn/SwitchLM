@@ -57,6 +57,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         })
     }
 

@@ -35,6 +35,11 @@ pub struct AppStateInner {
     pub bind_error: Mutex<Option<String>>,
     /// Handle to the port polling task (so we can abort it when stopping/restarting).
     pub polling_handle: Mutex<Option<JoinHandle<()>>>,
+    /// provider_id of the model that last produced a response - the "currently effective" plan.
+    /// Drives the tray-icon tooltip (single-line balance of the active plan) instead of listing
+    /// every plan (which overflows the Windows 64-char tray-tooltip limit). `None` until the
+    /// first request produces a response. Runtime-only, not persisted.
+    pub last_served_provider: Mutex<Option<String>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -57,6 +62,7 @@ impl AppStateInner {
             server_handle: Mutex::new(None),
             bind_error: Mutex::new(None),
             polling_handle: Mutex::new(None),
+            last_served_provider: Mutex::new(None),
         })
     }
 

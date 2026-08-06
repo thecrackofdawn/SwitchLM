@@ -1001,7 +1001,7 @@ mod tests {
             "AFPMonthly":  { "Quota": 2000.0,"Used": 850.5, "ResetTime": 1_780_531_200_000_i64 }
         }));
         let snap = crate::usage::snapshot_from_tiers(&tiers, &Some("Large".to_string()));
-        assert_eq!(snap.used, Some(25.0));
+        assert_eq!(snap.tiers[0].used_pct.unwrap(), 25.0);
         assert_eq!(snap.total, Some(100.0));
         assert_eq!(snap.remaining, Some(75.0));
         assert_eq!(snap.reset_at, Some(1_778_806_800)); // 5h ms -> secs
@@ -1029,7 +1029,7 @@ mod tests {
             max_value_usd: None,
         }];
         let snap = crate::usage::snapshot_from_tiers(&tiers, &None);
-        assert_eq!(snap.used, Some(42.0));
+        assert_eq!(snap.tiers[0].used_pct.unwrap(), 42.0);
         assert_eq!(snap.tiers.len(), 1);
         assert_eq!(snap.tiers[0].window, TIER_FIVE_HOUR);
         assert!(snap.plan.is_none());

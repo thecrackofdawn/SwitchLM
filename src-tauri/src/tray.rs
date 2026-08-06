@@ -15,7 +15,9 @@ use tauri::{AppHandle, Manager};
 use crate::commands;
 use crate::config::AppConfig;
 use crate::proxy::AppState;
-use crate::usage::{UsageSnapshot, TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT, TIER_MONTHLY};
+use crate::usage::{
+    primary_used, UsageSnapshot, TIER_FIVE_HOUR, TIER_WEEKLY_LIMIT, TIER_MONTHLY,
+};
 
 const TRAY_ID: &str = "main";
 
@@ -66,57 +68,38 @@ fn tier_summary(u: &UsageSnapshot) -> Option<String> {
     Some(parts.join(" "))
 }
 
-/// Primary value for the tray-icon tooltip: plan -> "80%" (5h used, falling back to top-level used);
-/// consumption -> "CNY 48.77". `None` when no value can be derived.
+/// Primary value for the tray-icon tooltip: plan -> "80%" (primary window used %, falling back
+/// 5h -> 周 -> 月); consumption -> "CNY 48.77". `None` when no value can be derived.
 fn tooltip_value(u: &UsageSnapshot) -> Option<String> {
     if u.billing_model == "consumption" {
         u.remaining.map(|r| format!("{} {:.2}", u.unit, r))
     } else {
-        let pct = u
-            .tiers
-            .iter()
-            .find(|t| t.window == TIER_FIVE_HOUR)
-            .and_then(|t| t.used_pct)
-            .or(u.used)?;
+        let (pct, _) = primary_used(&u.tiers)?;
         Some(format!("{}%", pct.round() as u32))
     }
 }
 
-/// Compact 套餐用量 summary for the tray icon tooltip, one account per line. `lines` are
-/// pre-formatted "name value" strings, already ordered & filtered by the caller. Joined with
-/// "\n" (native tray tooltips render it as a line break), hard-capped at 120 chars; whole
-/// lines only, with " …(+N)" when lines are dropped. Empty -> app name.
-fn usage_tooltip(lines: &[String]) -> String {
-    if lines.is_empty() {
-        return "SwitchLM".to_string();
-    }
-    const CAP: usize = 120;
-    const SEP: &str = "\n";
-    let total = lines.len();
-    // Largest k whose joined head fits (with a " …(+N)" tail when k < total).
-    for k in (1..=total).rev() {
-        let head: String = lines[..k].join(SEP);
-        let head_len = head.chars().count();
-        if k == total {
-            if head_len <= CAP {
-                return head;
-            }
-        } else {
-            let tail = format!(" …(+{})", total - k);
-            if head_len + tail.chars().count() <= CAP {
-                return format!("{head}{tail}");
+/// Tray-icon tooltip text: the balance of the plan the last request actually used (the
+/// "currently effective" plan), one line e.g. "火山 · coding plan 21%". Showing only the active
+/// plan keeps the tooltip well under the Windows 64-char tray-tooltip limit (listing every plan
+/// overflows it and gets mid-value-truncated by the OS). `None` (no request served yet), an
+/// unknown provider id, or a plan whose usage has no concrete value -> app name ("SwitchLM").
+fn last_served_tooltip(
+    cfg: &AppConfig,
+    usage: &HashMap<String, UsageSnapshot>,
+    last_served: Option<&str>,
+) -> String {
+    match last_served {
+        Some(pid) => {
+            let p = cfg.providers.iter().find(|p| p.id == pid);
+            let v = p.and_then(|p| usage.get(&p.id)).and_then(tooltip_value);
+            match (p, v) {
+                (Some(p), Some(v)) => format!("{} {v}", p.display_name),
+                _ => "SwitchLM".to_string(),
             }
         }
+        None => "SwitchLM".to_string(),
     }
-    // Even one line is too long: hard-truncate the first line.
-    let mut s: String = lines[0].chars().take(CAP).collect();
-    if total > 1 {
-        s.push_str(" …");
-    }
-    if s.chars().count() > CAP {
-        s = s.chars().take(CAP).collect();
-    }
-    s
 }
 
 /// Tray label for one account's usage: display name + (multi-account) vendor tag + usage display.
@@ -147,6 +130,7 @@ fn account_display(u: &UsageSnapshot) -> Option<String> {
 pub fn tray_menu_spec(
     cfg: &AppConfig,
     usage: &HashMap<String, UsageSnapshot>,
+    last_served: Option<&str>,
 ) -> TrayMenuSpec {
     // Vendors with >=2 providers: their accounts are ambiguous by name alone, so the label shows
     // ` [vendor]` to disambiguate. Single-account vendors stay clutter-free.
@@ -178,13 +162,7 @@ pub fn tray_menu_spec(
             label: account_label(p.display_name.as_str(), *tag, usage.get(&p.id).unwrap()).unwrap(),
         })
         .collect();
-    let tooltip_lines: Vec<String> = visible
-        .iter()
-        .filter_map(|(p, _)| {
-            tooltip_value(usage.get(&p.id).unwrap()).map(|v| format!("{} {v}", p.display_name))
-        })
-        .collect();
-    let tooltip = usage_tooltip(&tooltip_lines);
+    let tooltip = last_served_tooltip(cfg, usage, last_served);
     TrayMenuSpec { accounts, tooltip }
 }
 
@@ -224,7 +202,7 @@ fn build_menu(app: &AppHandle, spec: &TrayMenuSpec) -> tauri::Result<Menu<tauri:
 /// Create the system-tray icon + menu. `cfg` seeds the initial menu (usage is empty at
 /// startup; the periodic refresh repopulates quota %).
 pub fn build_tray(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()> {
-    let spec = tray_menu_spec(cfg, &HashMap::new());
+    let spec = tray_menu_spec(cfg, &HashMap::new(), None);
     let menu = build_menu(app, &spec)?;
     tauri::tray::TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().expect("app has no window icon").clone())
@@ -261,7 +239,8 @@ pub async fn refresh_tray_menu(app: &AppHandle) {
     let spec = {
         let cfg = state.config.read().await.clone();
         let usage = gather_usage(&state).await;
-        tray_menu_spec(&cfg, &usage)
+        let last_served = state.last_served_provider.lock().unwrap().clone();
+        tray_menu_spec(&cfg, &usage, last_served.as_deref())
     };
     match build_menu(app, &spec) {
         Ok(menu) => {
@@ -416,7 +395,6 @@ mod tests {
     #[test]
     fn account_label_consumption_shows_balance() {
         let u = UsageSnapshot {
-            used: Some(51.23),
             total: Some(100.0),
             remaining: Some(48.77),
             reset_at: None,
@@ -442,7 +420,6 @@ mod tests {
     #[test]
     fn account_label_none_when_no_usage_value() {
         let none = UsageSnapshot {
-            used: None,
             total: None,
             remaining: None,
             reset_at: None,
@@ -466,7 +443,6 @@ mod tests {
         usage.insert(
             "deepseek".into(),
             UsageSnapshot {
-                used: Some(51.23),
                 total: Some(100.0),
                 remaining: Some(48.77),
                 reset_at: None,
@@ -479,7 +455,7 @@ mod tests {
             },
         );
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         assert_eq!(spec.accounts.len(), 2);
         assert_eq!(spec.accounts[0].provider_id, "zhipu");
         assert_eq!(spec.accounts[0].label, "智谱 5h:80% 周:40% 月:10%");
@@ -496,7 +472,7 @@ mod tests {
         usage.insert("zhipu".into(), snap_tiers(Some(80.0), Some(40.0), Some(10.0)));
         // "custom" deliberately absent
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         assert_eq!(spec.accounts.len(), 1);
         assert_eq!(spec.accounts[0].provider_id, "zhipu");
     }
@@ -507,7 +483,6 @@ mod tests {
         cfg.providers.push(mk_provider("zhipu", "智谱"));
         cfg.providers.push(mk_provider("degraded", "降级账号"));
         let empty = UsageSnapshot {
-            used: None,
             total: None,
             remaining: None,
             reset_at: None,
@@ -522,7 +497,7 @@ mod tests {
         usage.insert("zhipu".into(), snap_tiers(Some(80.0), Some(40.0), Some(10.0)));
         usage.insert("degraded".into(), empty); // present in map, but no concrete value
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         assert_eq!(spec.accounts.len(), 1);
         assert_eq!(spec.accounts[0].provider_id, "zhipu");
         // "degraded" is in the usage map but yields no usage_display -> hidden
@@ -542,7 +517,7 @@ mod tests {
         usage.insert("volc2".into(), snap_tiers(Some(70.0), Some(50.0), Some(15.0)));
         usage.insert("zhipu".into(), snap_tiers(Some(80.0), Some(40.0), Some(10.0)));
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         let by_id: HashMap<&str, &AccountUsageSpec> =
             spec.accounts.iter().map(|a| (a.provider_id.as_str(), a)).collect();
         assert_eq!(by_id["volc1"].label, "火山号A [volcengine] 5h:40% 周:20% 月:5%");
@@ -554,7 +529,7 @@ mod tests {
     fn spec_accounts_empty_when_no_provider_has_usage() {
         let mut cfg = AppConfig::default();
         cfg.providers.push(mk_provider("custom", "自定义"));
-        let spec = tray_menu_spec(&cfg, &HashMap::new());
+        let spec = tray_menu_spec(&cfg, &HashMap::new(), None);
         assert!(spec.accounts.is_empty());
     }
 
@@ -570,7 +545,7 @@ mod tests {
         usage.insert("b".into(), snap_tiers(Some(20.0), None, None));
         usage.insert("c".into(), snap_tiers(Some(30.0), None, None));
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         let ids: Vec<&str> = spec.accounts.iter().map(|a| a.provider_id.as_str()).collect();
         assert_eq!(ids, vec!["c", "a", "b"]); // ordered, then unlisted in config order
     }
@@ -584,35 +559,60 @@ mod tests {
         usage.insert("a".into(), snap_tiers(Some(10.0), None, None));
         usage.insert("b".into(), snap_tiers(Some(20.0), None, None));
 
-        let spec = tray_menu_spec(&cfg, &usage);
+        let spec = tray_menu_spec(&cfg, &usage, None);
         let ids: Vec<&str> = spec.accounts.iter().map(|a| a.provider_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
     }
 
-    #[test]
-    fn spec_tooltip_lists_primary_values_in_order() {
+    fn tooltip_cfg_usage() -> (AppConfig, HashMap<String, UsageSnapshot>) {
         let mut cfg = AppConfig::default();
         cfg.providers.push(mk_provider("zhipu", "智谱"));
         cfg.providers.push(mk_provider("deepseek", "DS"));
-        cfg.usage_order = vec!["deepseek".into(), "zhipu".into()];
         let mut usage = HashMap::new();
         usage.insert("zhipu".into(), snap_tiers(Some(80.0), None, None));
         usage.insert(
             "deepseek".into(),
             UsageSnapshot {
-                used: Some(51.23), total: Some(100.0), remaining: Some(48.77),
+                total: Some(100.0), remaining: Some(48.77),
                 reset_at: None, unit: "CNY".into(), raw_summary: None, plan: None,
                 tiers: vec![], billing_model: "consumption".into(), plan_info: None,
             },
         );
-        let spec = tray_menu_spec(&cfg, &usage);
-        assert_eq!(spec.tooltip, "DS CNY 48.77\n智谱 80%");
+        (cfg, usage)
+    }
+
+    #[test]
+    fn spec_tooltip_shows_last_served_provider_balance() {
+        // Tooltip shows ONLY the plan the last request used (one line), not every plan.
+        let (cfg, usage) = tooltip_cfg_usage();
+        let plan = tray_menu_spec(&cfg, &usage, Some("zhipu"));
+        assert_eq!(plan.tooltip, "智谱 80%");
+        let consumption = tray_menu_spec(&cfg, &usage, Some("deepseek"));
+        assert_eq!(consumption.tooltip, "DS CNY 48.77");
+    }
+
+    #[test]
+    fn spec_tooltip_is_switchlm_when_no_last_served() {
+        // No request served yet -> app name.
+        let (cfg, usage) = tooltip_cfg_usage();
+        assert_eq!(tray_menu_spec(&cfg, &usage, None).tooltip, "SwitchLM");
+    }
+
+    #[test]
+    fn spec_tooltip_is_switchlm_when_last_served_unknown_or_no_usage() {
+        let (cfg, usage) = tooltip_cfg_usage();
+        // Unknown provider id -> SwitchLM.
+        assert_eq!(tray_menu_spec(&cfg, &usage, Some("nope")).tooltip, "SwitchLM");
+        // Known provider but absent from the usage map -> SwitchLM.
+        let mut cfg2 = AppConfig::default();
+        cfg2.providers.push(mk_provider("lonely", "孤号"));
+        assert_eq!(tray_menu_spec(&cfg2, &HashMap::new(), Some("lonely")).tooltip, "SwitchLM");
     }
 
     #[test]
     fn spec_tooltip_is_switchlm_when_no_usage() {
         let cfg = AppConfig::default();
-        let spec = tray_menu_spec(&cfg, &HashMap::new());
+        let spec = tray_menu_spec(&cfg, &HashMap::new(), None);
         assert_eq!(spec.tooltip, "SwitchLM");
     }
 
@@ -631,7 +631,6 @@ mod tests {
         }
         let any = !tiers.is_empty();
         UsageSnapshot {
-            used: five_hour,
             total: if any { Some(100.0) } else { None },
             remaining: five_hour.map(|p| 100.0 - p),
             reset_at: None,
@@ -662,49 +661,23 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_value_plan_uses_five_hour_then_used() {
+    fn tooltip_value_uses_five_hour_then_falls_back_weekly() {
+        // 5h 有 -> 5h 为主值。
         assert_eq!(tooltip_value(&snap_tiers(Some(80.0), None, None)).as_deref(), Some("80%"));
-        // No five_hour tier but top-level used present -> fall back.
-        let mut u = snap_tiers(None, Some(40.0), None);
-        u.used = Some(55.0);
-        assert_eq!(tooltip_value(&u).as_deref(), Some("55%"));
+        // 5h 缺、周档有 -> 周档为主值（千问 regression：此前因 used=None 被 tooltip 丢弃）。
+        assert_eq!(tooltip_value(&snap_tiers(None, Some(40.0), None)).as_deref(), Some("40%"));
+        // 所有窗口都无值 -> None（账号从 tooltip 隐藏）。
+        assert_eq!(tooltip_value(&snap_tiers(None, None, None)).as_deref(), None);
     }
 
     #[test]
     fn tooltip_value_consumption_shows_balance() {
         let u = UsageSnapshot {
-            used: Some(51.23), total: Some(100.0), remaining: Some(48.77),
+            total: Some(100.0), remaining: Some(48.77),
             reset_at: None, unit: "CNY".into(), raw_summary: None, plan: None,
             tiers: vec![], billing_model: "consumption".into(), plan_info: None,
         };
         assert_eq!(tooltip_value(&u).as_deref(), Some("CNY 48.77"));
     }
 
-    #[test]
-    fn usage_tooltip_empty_is_app_name() {
-        assert_eq!(usage_tooltip(&[]), "SwitchLM");
-    }
-
-    #[test]
-    fn usage_tooltip_one_line_per_account() {
-        let lines = vec!["智谱 80%".to_string(), "DeepSeek CNY 48.77".to_string()];
-        assert_eq!(usage_tooltip(&lines), "智谱 80%\nDeepSeek CNY 48.77");
-    }
-
-    #[test]
-    fn usage_tooltip_truncates_many_accounts_with_ellipsis() {
-        // 15 accounts (10 chars each). Joined by "\n", all 15 = 164 chars > the 120 cap, so
-        // truncation is forced and a " …(+N)" tail must appear; every included line must be
-        // whole (no line cut mid-name). Note: with the 1-char "\n" separator 10 accounts fit
-        // in 109 chars and would NOT truncate, so 15 are needed to hit the cap.
-        let lines: Vec<String> = (0..15).map(|i| format!("账号编号{:02} 80%", i)).collect();
-        let out = usage_tooltip(&lines);
-        assert!(out.chars().count() <= 120, "len={} out={out}", out.chars().count());
-        assert!(out.contains("…(+"), "missing ellipsis: {out}");
-        // The head (before the ellipsis) is newline-joined whole input lines.
-        let head = out.split(" …(+").next().unwrap();
-        for unit in head.split('\n') {
-            assert!(lines.contains(&unit.to_string()), "partial/unknown unit in tooltip: {unit:?}");
-        }
-    }
 }

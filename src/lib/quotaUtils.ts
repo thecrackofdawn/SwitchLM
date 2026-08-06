@@ -1,4 +1,4 @@
-import type { Provider, UsageEntry, UsageSnapshot } from "./types";
+import type { Provider, UsageEntry, UsageSnapshot, UsageTier } from "./types";
 import { hasUsageAdapter, isUsageSupportedVendor } from "./selectLabel";
 
 // Low-balance warn floor for consumption providers, in the same units as `snapshot.remaining`.
@@ -31,20 +31,45 @@ function fmtReset(epochSecs: number): string {
   return new Date(epochSecs * 1000).toLocaleString();
 }
 
+const PRIMARY_WINDOW_ORDER = ["five_hour", "weekly_limit", "monthly"] as const;
+
+/** plan 主值：5h -> 周 -> 月 首个有值窗口；都没有则 null。 */
+function primaryUsed(
+  tiers: UsageTier[] | undefined,
+): { pct: number; window: string; resetAt: number | null } | null {
+  for (const w of PRIMARY_WINDOW_ORDER) {
+    const t = tiers?.find((x) => x.window === w);
+    if (t?.used_pct != null) {
+      return { pct: t.used_pct, window: w, resetAt: t.reset_at ?? null };
+    }
+  }
+  return null;
+}
+
+function windowLabel(w?: string): string {
+  switch (w) {
+    case "five_hour": return "5 小时窗口";
+    case "weekly_limit": return "每周窗口";
+    case "monthly": return "每月窗口";
+    default: return "套餐窗口";
+  }
+}
+
 // --- Shared core: per-snapshot quota math used by both chips and route nodes. ---
 
 interface QuotaMath {
   billing: "plan" | "consumption";
   remaining: number; // plan: 0-100 remaining %; consumption: balance
   used?: number; // plan only — surfaces in tooltip
+  window?: string; // plan only - which window the value came from (tooltip label)
   unit?: string; // consumption only
-  resetAt?: number | null; // plan: five_hour.reset_at
+  resetAt?: number | null;
 }
 
 /**
  * Parse a snapshot into the shared quota math. Returns null when no number can be
- * derived (missing five_hour tier for plan, or null remaining for consumption).
- * Plan reads the five_hour window specifically; consumption reads snapshot.remaining.
+ * derived (no usable tier for plan, or null remaining for consumption).
+ * Plan uses the primary window (5h -> 周 -> 月, first present); consumption reads snapshot.remaining.
  */
 function quotaMathFor(snap: UsageSnapshot): QuotaMath | null {
   if (snap.billing_model === "consumption") {
@@ -52,14 +77,14 @@ function quotaMathFor(snap: UsageSnapshot): QuotaMath | null {
     if (remaining == null) return null;
     return { billing: "consumption", remaining, unit: snap.unit };
   }
-  const fiveHour = snap.tiers?.find((t) => t.window === "five_hour");
-  const used = fiveHour?.used_pct;
-  if (used == null) return null;
+  const primary = primaryUsed(snap.tiers);
+  if (!primary) return null;
   return {
     billing: "plan",
-    remaining: Math.max(0, 100 - used),
-    used,
-    resetAt: fiveHour?.reset_at,
+    remaining: Math.max(0, 100 - primary.pct),
+    used: primary.pct,
+    window: primary.window,
+    resetAt: primary.resetAt,
   };
 }
 
@@ -74,7 +99,7 @@ function statusFor(m: QuotaMath): "ok" | "warn" | "danger" {
 /** Shared tooltip body — same copy on chip and node. `used` is always set for plan. */
 function tooltipFor(m: QuotaMath): string {
   if (m.billing === "consumption") return "按量付费余额（耗尽停机）";
-  let tip = `5 小时窗口：可用 ${round1(m.remaining)}%（已用 ${round1(m.used!)}%）`;
+  let tip = `${windowLabel(m.window)}：可用 ${round1(m.remaining)}%（已用 ${round1(m.used!)}%）`;
   if (m.resetAt != null) tip += `，重置于 ${fmtReset(m.resetAt)}`;
   return tip;
 }
@@ -89,7 +114,7 @@ function textForChip(m: QuotaMath): string {
 /**
  * Build the Dashboard's per-provider quota chips. Pure & order-stable.
  *
- * - plan providers → five_hour window remaining % (status by remaining thresholds)
+ * - plan providers → primary window (5h → 周 → 月) remaining % (status by remaining thresholds)
  * - consumption providers → balance (red at ≤0 / below LOW_BALANCE_THRESHOLD, else green)
  * - unsupported vendor → skipped; query failure → 查询失败; parseable but missing data → 无数据; known vendor without a usage adapter → 不支持
  *

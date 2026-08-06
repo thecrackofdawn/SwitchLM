@@ -80,12 +80,10 @@ impl UsageProvider for DeepseekUsageProvider {
         let topped_up: f64 = parse_balance_field(entry, "topped_up_balance")?;
         let total_balance: f64 = parse_balance_field(entry, "total_balance")?;
 
-        // topped_up_balance = total recharged; total_balance = remaining → used = topped_up - remaining.
-        let used = (topped_up - total_balance).max(0.0);
+        // topped_up_balance = total recharged; total_balance = remaining.
         let remaining = total_balance;
 
         Ok(UsageSnapshot {
-            used: Some(used),
             total: Some(topped_up),
             remaining: Some(remaining),
             reset_at: None,
@@ -164,7 +162,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(snap.used, Some(51.23)); // 100.00 - 48.77
         assert_eq!(snap.total, Some(100.00));
         assert_eq!(snap.remaining, Some(48.77));
         assert_eq!(snap.unit, "CNY");
@@ -323,7 +320,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(snap.used, Some(100.0));
         assert_eq!(snap.total, Some(100.0));
         assert_eq!(snap.remaining, Some(0.0));
         assert_eq!(snap.raw_summary, None);

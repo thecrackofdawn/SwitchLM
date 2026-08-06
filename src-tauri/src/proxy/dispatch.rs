@@ -131,6 +131,19 @@ pub async fn dispatch(
             "forward failed"
         ),
     }
+    // Record the effective model's provider for the tray tooltip (single-line "active plan" view).
+    // Updated whenever a model produced a response - that is the plan the last request actually
+    // used. FallbackExhausted (no model responded) leaves the previous value intact, so the
+    // tooltip keeps showing the last plan that was in use rather than going blank.
+    if let Some(served_id) = outcome.served_model_id.clone() {
+        let provider_id = {
+            let cfg = state.config.read().await;
+            cfg.models.iter().find(|m| m.id == served_id).map(|m| m.provider_id.clone())
+        };
+        if let Some(pid) = provider_id {
+            *state.last_served_provider.lock().unwrap() = Some(pid);
+        }
+    }
     result
 }
 
@@ -1021,7 +1034,12 @@ fn exhausted_reset_at(usage: &UsageSnapshot) -> Option<i64> {
             .filter_map(|t| t.reset_at)
             .max();
     }
-    if exhausted(usage.used) {
+    // 无 tier 明细 → consumption（余额）型。耗尽 = 余额见底。
+    // （旧：`exhausted(usage.used)` —— 把 CNY 金额当百分比比较；DeepSeek reset_at=None，
+    // 故此处仍返回 None → 调用方回落 cooldown，行为不变；但判断现在对带 reset_at 的未来
+    // consumption 厂商也正确。）
+    let depleted = usage.remaining.map(|r| r <= 0.0).unwrap_or(false);
+    if depleted {
         return usage.reset_at;
     }
     None
@@ -1195,6 +1213,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         })
     }
 
@@ -1218,6 +1237,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
         let snap = snapshot_model(&state, "m_a").await.unwrap();
         assert_eq!(snap.provider_id, "prov_abc"); // opaque key preserved
@@ -1244,6 +1264,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
         assert_eq!(model_tag(&state, "m_a").await, "zhipu/m_a");
         assert_eq!(model_tag(&state, "m_missing").await, "unknown/m_missing");
@@ -1289,6 +1310,51 @@ mod tests {
         assert!(body_str(resp).await.contains("from-b"));
         assert!(state.health.is_cooling("m_a", 1000)); // tripped
         assert!(!state.health.is_cooling("m_b", 1000)); // served, healthy
+    }
+
+    #[tokio::test]
+    async fn last_served_provider_records_the_model_that_served() {
+        // mock_a 429 (trips breaker) -> fallback to mock_b which serves 200. The tray tooltip shows
+        // the *effective* (serving) plan's balance, so last_served_provider must be the fallback's
+        // provider ("pb"), not the primary's ("zhipu").
+        let mock_a = MockServer::start().await;
+        let mock_b = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"code":1302}})))
+            .mount(&mock_a).await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}),
+            ))
+            .mount(&mock_b).await;
+
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        assert!(state.last_served_provider.lock().unwrap().is_none()); // nothing served yet
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*state.last_served_provider.lock().unwrap(), Some("pb".to_string()));
+    }
+
+    #[tokio::test]
+    async fn last_served_provider_unchanged_when_no_model_serves() {
+        // Every hop rate-limited (FallbackExhausted) -> no model produced a response -> last_served
+        // stays at its previous value (None here), so the tooltip keeps the last active plan
+        // rather than going blank mid-session.
+        let mock_a = MockServer::start().await;
+        let mock_b = MockServer::start().await;
+        for m in [&mock_a, &mock_b] {
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"message":"rate limited"}})))
+                .mount(m).await;
+        }
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let app = build_router(state.clone());
+        let _ = app.oneshot(oai_post()).await.unwrap();
+        assert!(state.last_served_provider.lock().unwrap().is_none()); // unchanged
     }
 
     #[tokio::test]
@@ -1390,6 +1456,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
 
         let app = build_router(state.clone());
@@ -1456,6 +1523,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
 
         let app = build_router(state.clone());
@@ -1598,6 +1666,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
 
         let app = build_router(state.clone());
@@ -1638,7 +1707,6 @@ mod tests {
 
     fn snap_used(used: Option<f64>, reset_at: Option<i64>) -> UsageSnapshot {
         UsageSnapshot {
-            used,
             total: used.map(|_| 100.0),
             remaining: used.map(|u| (100.0 - u).max(0.0)),
             reset_at,
@@ -1651,9 +1719,22 @@ mod tests {
         }
     }
 
+    fn snap_consumption(remaining: Option<f64>, reset_at: Option<i64>) -> UsageSnapshot {
+        UsageSnapshot {
+            total: None,
+            remaining,
+            reset_at,
+            unit: "CNY".into(),
+            raw_summary: None,
+            plan: None,
+            tiers: vec![],
+            billing_model: "consumption".into(),
+            plan_info: None,
+        }
+    }
+
     fn snap_tiers(tiers: Vec<(Option<f64>, Option<i64>)>) -> UsageSnapshot {
         UsageSnapshot {
-            used: None,
             total: None,
             remaining: None,
             reset_at: None,
@@ -1700,6 +1781,19 @@ mod tests {
             (Some(50.0), Some(1_800_000_000)),
         ]);
         assert_eq!(exhausted_reset_at(&usage), None);
+    }
+
+    #[test]
+    fn exhausted_reset_at_consumption_depleted_uses_remaining_not_used() {
+        // tiers 为空 -> consumption 分支。`used` 为 None（CNY 余额没有意义的 used-%），
+        // 但 remaining<=0 表示余额见底 -> 耗尽。旧代码读 `used`(None) -> 漏判。
+        let usage = snap_consumption(Some(0.0), Some(1_700_000_000));
+        assert_eq!(exhausted_reset_at(&usage), Some(1_700_000_000));
+        // 余额仍为正 -> 未耗尽 -> None。
+        assert_eq!(
+            exhausted_reset_at(&snap_consumption(Some(48.77), Some(1_700_000_000))),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1959,6 +2053,7 @@ mod tests {
             usage_cache: Default::default(), bound_port: std::sync::Mutex::new(None),
             server_handle: std::sync::Mutex::new(None), bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2051,6 +2146,7 @@ mod tests {
                 server_handle: std::sync::Mutex::new(None),
                 bind_error: std::sync::Mutex::new(None),
                 polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
             });
             let app = build_router(state.clone());
             let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2126,6 +2222,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None),
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
