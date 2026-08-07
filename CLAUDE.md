@@ -25,7 +25,7 @@ cargo test --manifest-path src-tauri/Cargo.toml fallback_on_rate_limit   # one t
 
 Backend tests are co-located as `#[cfg(test)] mod tests` in each `.rs` file. HTTP behavior is tested with `wiremock` mock servers; breaker/cache logic is made deterministic by an injectable `Clock` (`FakeClock`) and an in-memory `MemoryStore` secret backend.
 
-Windows build prerequisites: Node ≥ 20, Rust stable, MSVC C++ Build Tools, WebView2.
+Windows build prerequisites: Node ≥ 20, Rust stable, MSVC C++ Build Tools, WebView2. Linux build prerequisites: Node ≥ 20, Rust stable, plus webkit2gtk/system dependencies per Tauri docs.
 
 ## Architecture
 
@@ -93,6 +93,7 @@ Vue 3 `<script setup>` + Pinia + Vue Router (hash history) + Naive UI. UI is Chi
 
 - **Logs must identify vendor + upstream model name, never the opaque internal `id`** (`m_xxx` is unrecognizable on another machine). `dispatch`/`log_hop` already follow this; preserve it.
 - **Process & port**: closing the window hides to tray (proxy + tray keep running; quit via tray). If the preferred port (`6950`, configurable) is occupied, the proxy auto-recovers (polls every 10s) and surfaces a `bindError`. Because agents hardcode the env URL, a port-bind failure is warned prominently as a `bindError` (the proxy polls the configured port every 10s and never silently binds another); copy-paste env snippets carry the bound port.
+- **Cross-platform**: the app targets **Windows and Linux**. When developing any feature — file paths, tray/icon resources, autostart, shell/terminal invocation, OS keyring access, environment-variable expansion, case-sensitive paths — verify behavior on both platforms. Use `std::path::PathBuf` (never hardcoded `\` or `/`), guard platform-specific code with `#[cfg(target_os = ...)]`, and prefer Tauri cross-platform APIs over native crate calls where possible.
 
 ## Spec-driven workflow
 

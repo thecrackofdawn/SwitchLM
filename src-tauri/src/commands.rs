@@ -810,6 +810,29 @@ pub async fn toggle_autostart(
     toggle_autostart_core(&state, &app, enabled).await
 }
 
+/// Decide the outcome of a disable request against the real OS autostart entry.
+///
+/// Returns `Ok(())` whenever the entry ends up absent — whether `disable` removed it
+/// or it was already gone (confirmed by `is_enabled == Ok(false)`). The already-absent
+/// case is the root cause of "设置失败：…(os error 2)": after a reinstall/uninstall, a
+/// Tauri `identifier` change, or external registry cleanup, the OS entry is gone while
+/// the persisted `settings.autostart` still reads `true`, so `disable()` errors on the
+/// missing entry (Windows `RegDeleteValueW` → `ERROR_FILE_NOT_FOUND`, i.e. os error 2).
+/// That is exactly the state the user asked for, so it is success, not a failure.
+///
+/// A genuine failure — `disable` errored AND the entry is still present or its state is
+/// unverifiable — is returned as `Err`. Generic over `E` because the decision depends
+/// only on Ok/Err and the bool, never on the error's contents.
+fn disable_outcome<E>(disable: Result<(), E>, is_enabled: Result<bool, E>) -> Result<(), E> {
+    match disable {
+        Ok(()) => Ok(()),
+        Err(e) => match is_enabled {
+            Ok(false) => Ok(()),
+            _ => Err(e),
+        },
+    }
+}
+
 /// Core autostart toggle (OS plugin + persist), shared by the command and the tray menu handler.
 pub async fn toggle_autostart_core(
     state: &AppState,
@@ -820,7 +843,12 @@ pub async fn toggle_autostart_core(
     if enabled {
         manager.enable().map_err(|e| e.to_string())?;
     } else {
-        manager.disable().map_err(|e| e.to_string())?;
+        // Idempotent disable: the persisted `settings.autostart` can be `true` while the
+        // OS entry is already gone (reinstall/uninstall, an `identifier` change, or
+        // external registry cleanup). `disable()` would then error on the missing entry
+        // (Windows os error 2); `is_enabled` confirms whether it is genuinely gone, in
+        // which case the desired state is already reached. Any other failure propagates.
+        disable_outcome(manager.disable(), manager.is_enabled()).map_err(|e| e.to_string())?;
     }
     {
         let mut cfg = state.config.write().await;
@@ -1369,6 +1397,35 @@ fn env_snippet(port: u16) -> EnvSnippet {
 mod tests {
     use super::*;
     use crate::config::*;
+
+    // ---- autostart disable idempotency (fix for "设置失败：…(os error 2)") ----
+
+    #[test]
+    fn disable_outcome_swallows_when_entry_already_absent() {
+        // The reported bug: disable() fails (Windows os error 2) because the autostart
+        // entry was already removed (reinstall/uninstall/identifier change), but
+        // is_enabled confirms it is gone. Desired state reached → Ok.
+        assert!(disable_outcome(Err("os error 2"), Ok(false)).is_ok());
+    }
+
+    #[test]
+    fn disable_outcome_propagates_when_entry_still_present() {
+        // disable() failed AND the entry is verifiably still enabled → real failure.
+        assert!(disable_outcome(Err("access denied"), Ok(true)).is_err());
+    }
+
+    #[test]
+    fn disable_outcome_propagates_when_state_unverifiable() {
+        // disable() failed AND is_enabled() also failed → cannot confirm → propagate.
+        assert!(disable_outcome(Err("os error 2"), Err("probe failed")).is_err());
+    }
+
+    #[test]
+    fn disable_outcome_ok_when_disable_succeeded() {
+        // Happy path: disable() removed the entry; the probe result is irrelevant.
+        assert!(disable_outcome::<&str>(Ok(()), Ok(false)).is_ok());
+        assert!(disable_outcome::<&str>(Ok(()), Ok(true)).is_ok());
+    }
 
     #[test]
     fn fallback_map_reflects_config() {

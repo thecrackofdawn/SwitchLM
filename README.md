@@ -31,7 +31,7 @@ SwitchLM 解决的核心问题是：**拥有多个服务商编程套餐时，按
 ## 快速使用
 
 ### 安装
-SwitchLM 从[release页面](https://github.com/thecrackofdawn/SwitchLM/releases)下载最新版本，当前提供了windows安装包。
+SwitchLM 从[release页面](https://github.com/thecrackofdawn/SwitchLM/releases)下载最新版本，当前提供了windows和linux安装包。
 
 ### 配置指导
 #### 添加服务商
@@ -122,3 +122,6 @@ npm run build                                      # 前端类型检查 + 构建
 
 - [ ] **套餐支持并发配置**：为每个套餐/账号配置最大并发请求数，并提供合理默认值（应对套餐的并发上限，避免无谓的 429）。
 - [ ] **添加sk-xxx认证**：用于团队套餐管理，服务化部署，多人同时访问。
+- [ ] **辅助自动化配置常见编程智能体**：用户帮助用户快速配置，使用本应用提供的代理模型
+- [ ] **请求缓存**：需要先验证下作为本地转发器缓存请求是否有收益
+- [ ] **加入token消耗统计**：加入token消耗统计

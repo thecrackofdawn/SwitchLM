@@ -10,6 +10,7 @@ pub mod logging;
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::proxy::{server, AppStateInner};
 
@@ -35,6 +36,31 @@ async fn start_proxy_with_retry(state: proxy::AppState, port: u16) {
 /// on boot launches while showing it on every other launch (manual open, dev).
 fn is_autostart_launch(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
     args.into_iter().any(|a| a.as_ref() == "--autostart")
+}
+
+/// Whether startup should recreate the OS autostart entry. Heals only the
+/// true→missing case (user wants it on but it's confirmed off) — never the reverse,
+/// so we don't fight an entry the user set up or tore down by other means.
+/// `is_enabled` is `Some(b)` for `Ok(b)` from the probe, `None` for an `Err`.
+fn autostart_needs_reenable(desired_on: bool, is_enabled: Option<bool>) -> bool {
+    desired_on && is_enabled == Some(false)
+}
+
+/// Best-effort reconcile of the OS autostart entry with the persisted preference.
+///
+/// After a reinstall/uninstall or a Tauri `identifier` change, `settings.autostart`
+/// can read `true` while the OS entry is already gone. Recreate it so the user's
+/// declared intent ("boot at login") survives a reinstall. A failure is logged and
+/// swallowed — autostart must never block startup. Only heals true→missing.
+fn reconcile_autostart(app: &tauri::AppHandle, desired_on: bool) {
+    let manager = app.autolaunch();
+    if !autostart_needs_reenable(desired_on, manager.is_enabled().ok()) {
+        return;
+    }
+    tracing::info!("开机自启：系统启动项缺失（重装/identifier 变更/外部清理），按持久化偏好重新写入");
+    if let Err(e) = manager.enable() {
+        tracing::warn!("重新写入开机自启失败（已忽略）：{e}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -99,6 +125,9 @@ pub fn run() {
             if config::store::normalize_legacy_vendors(&mut cfg) {
                 let _ = config::store::save(&dir, &cfg);
             }
+            // 开机自启对账：重装/卸载/identifier 变更后系统启动项可能已消失，而 settings.autostart
+            // 仍为 true——按用户偏好把启动项重新写回（best-effort，失败仅告警，绝不阻断启动）。
+            reconcile_autostart(app.handle(), cfg.settings.autostart);
             let secrets = config::SecretStoreHandle::new(store, kind);
             // Cookie 现分片存入 keyring（绕过单条目字节上限），文件回退已移除。若旧版本曾把超大
             // cookie 落到 secrets.json，启动时一次性迁回 keyring 并删除该明文文件。
@@ -219,7 +248,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_autostart_launch;
+    use super::{autostart_needs_reenable, is_autostart_launch};
 
     #[test]
     fn autostart_flag_present() {
@@ -241,5 +270,28 @@ mod tests {
     fn no_false_positive_on_lookalike() {
         // a flag that merely contains the substring must not match
         assert!(!is_autostart_launch(["switchlm", "--no-autostart", "--autostart-x"]));
+    }
+
+    #[test]
+    fn autostart_needs_reenable_only_when_on_but_missing() {
+        assert!(autostart_needs_reenable(true, Some(false)));
+    }
+
+    #[test]
+    fn autostart_needs_reenable_not_when_already_enabled() {
+        assert!(!autostart_needs_reenable(true, Some(true)));
+    }
+
+    #[test]
+    fn autostart_needs_reenable_never_when_desired_off() {
+        // Never fights an entry on the false side.
+        assert!(!autostart_needs_reenable(false, Some(false)));
+        assert!(!autostart_needs_reenable(false, Some(true)));
+    }
+
+    #[test]
+    fn autostart_needs_reenable_not_when_state_unverifiable() {
+        // Probe errored → don't risk a wrong re-enable.
+        assert!(!autostart_needs_reenable(true, None));
     }
 }
