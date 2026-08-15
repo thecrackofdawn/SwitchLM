@@ -8,6 +8,7 @@ show_downloads: false
 github_repo: https://github.com/thecrackofdawn/SwitchLM
 releases_url: https://github.com/thecrackofdawn/SwitchLM/releases
 markdown: kramdown
+permalink: pretty
 exclude:
   - docs/superpowers
   - Gemfile
