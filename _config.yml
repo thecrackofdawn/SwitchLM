@@ -1,0 +1,10 @@
+title: SwitchLM
+description: 多编程套餐管理工具 —— 按时间与优先级自动切换模型分发策略
+theme: jekyll-theme-cayman
+lang: zh-CN
+url: https://thecrackofdawn.github.io
+baseurl: "/SwitchLM"
+show_downloads: false
+github_repo: https://github.com/thecrackofdawn/SwitchLM
+releases_url: https://github.com/thecrackofdawn/SwitchLM/releases
+markdown: kramdown
