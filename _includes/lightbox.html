@@ -1,0 +1,20 @@
+<dialog id="lightbox" class="lightbox">
+  <button class="lightbox-close" aria-label="关闭">&#10005;</button>
+  <img src="" alt="截图放大预览">
+</dialog>
+<script>
+  (function () {
+    var dialog = document.getElementById('lightbox');
+    if (!dialog || !dialog.showModal) return;
+    dialog.addEventListener('click', function (e) {
+      if (e.target === dialog || e.target.classList.contains('lightbox-close')) dialog.close();
+    });
+    document.querySelectorAll('a.lightbox-link').forEach(function (a) {
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        dialog.querySelector('img').src = a.getAttribute('href');
+        dialog.showModal();
+      });
+    });
+  })();
+</script>

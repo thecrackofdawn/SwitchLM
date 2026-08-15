@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: 'zh-CN' }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% seo %}
+  <link rel="icon" type="image/svg+xml" href="{{ '/assets/app-icon.svg' | relative_url }}">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+</head>
+<body>
+  <header class="page-header" role="banner">
+    {% include nav.html %}
+    <h1 class="project-name">
+      <img class="header-logo" src="{{ '/assets/app-icon.svg' | relative_url }}" alt="SwitchLM 图标">
+      {{ site.title }}
+    </h1>
+    <h2 class="project-tagline">{{ site.description }}</h2>
+    {% if page.hero_buttons != false and layout.hero_buttons != false %}
+    <p class="hero-buttons">
+      <a href="{{ site.releases_url }}" class="btn">&#11015; 下载最新版</a>
+      <a href="{{ site.github_repo }}" class="btn">&#9733; GitHub</a>
+    </p>
+    {% endif %}
+  </header>
+  <main id="content" class="main-content" role="main">
+    {{ content }}
+  </main>
+</body>
+</html>

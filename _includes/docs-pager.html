@@ -1,0 +1,10 @@
+{% if include.prev or include.next %}
+<nav class="docs-pager">
+  {% if include.prev %}
+  <a class="pager-prev" href="{{ include.prev.url | relative_url }}">&#8592; {{ include.prev.title }}</a>
+  {% endif %}
+  {% if include.next %}
+  <a class="pager-next" href="{{ include.next.url | relative_url }}">{{ include.next.title }} &#8594;</a>
+  {% endif %}
+</nav>
+{% endif %}
