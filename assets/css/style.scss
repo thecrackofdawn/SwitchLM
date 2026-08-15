@@ -172,3 +172,11 @@
 @media (max-width: 768px) { .footer-grid { grid-template-columns: 1fr; } }
 .footer-grid h4 { margin: 0 0 8px; font-size: 0.95rem; }
 .footer-grid ul { margin: 0; padding-left: 18px; font-size: 0.9rem; color: #57606a; }
+.site-footer .theme-credit {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e1e4e8;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #8b949e;
+}
