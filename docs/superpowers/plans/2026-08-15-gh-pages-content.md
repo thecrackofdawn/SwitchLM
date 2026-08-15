@@ -592,7 +592,7 @@ git commit -m "Add install and quick-start guide doc"
 
 - [ ] **Step 1: 写 `docs/agents.md`**
 
-```markdown
+````markdown
 ---
 layout: docs
 title: 接入编程 Agent
@@ -629,7 +629,7 @@ Base URL 填 `http://localhost:6950/v1`，模型名填你配置的路由名称�
 ## 解析链路
 
 > Agent 发送的模型名会先解析为路由（Profile），再映射到背后的真实模型与上游厂商。路由支持配置别名（如 `claude-sonnet-4`），让 Agent 无需改动模型名即可走代理。
-```
+````
 
 - [ ] **Step 2: 验证**
 
