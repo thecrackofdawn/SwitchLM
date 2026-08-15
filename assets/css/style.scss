@@ -1,0 +1,174 @@
+---
+---
+@import "jekyll-theme-cayman";
+
+/* ===== 品牌化页头 ===== */
+.page-header {
+  background: linear-gradient(120deg, #0091ea 0%, #2979ff 100%);
+  padding: 1.5rem 1rem 3rem;
+}
+.header-logo {
+  width: 36px;
+  height: 36px;
+  vertical-align: -6px;
+  margin-right: 10px;
+  border-radius: 8px;
+}
+.site-nav {
+  font-size: 0.95rem;
+  margin-bottom: 1.5rem;
+}
+.site-nav a {
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 10px;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.site-nav a:hover { border-bottom-color: rgba(255, 255, 255, 0.7); }
+.hero-buttons .btn {
+  margin: 0 6px 10px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* ===== 特性卡片 ===== */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 1.5rem 0;
+}
+.feature-card {
+  border: 1px solid #e1e4e8;
+  border-radius: 10px;
+  padding: 18px 16px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.feature-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+.feature-card .feature-icon { font-size: 1.6rem; }
+.feature-card h3 { margin: 8px 0 6px; font-size: 1.05rem; }
+.feature-card p { margin: 0; color: #57606a; font-size: 0.92rem; }
+@media (max-width: 768px) { .feature-grid { grid-template-columns: 1fr; } }
+
+/* ===== 截图画廊与灯箱 ===== */
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin: 1.5rem 0;
+}
+@media (max-width: 768px) { .gallery { grid-template-columns: 1fr; } }
+.gallery a.lightbox-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid #e1e4e8;
+  border-radius: 10px;
+  overflow: hidden;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.gallery a.lightbox-link:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.1);
+}
+.gallery img { display: block; width: 100%; margin: 0; border-radius: 10px 10px 0 0; }
+.gallery figcaption,
+.gallery .caption {
+  display: block;
+  text-align: center;
+  padding: 8px;
+  font-size: 0.9rem;
+  color: #57606a;
+}
+.lightbox {
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  max-width: 92vw;
+  max-height: 92vh;
+  background: transparent;
+}
+.lightbox::backdrop { background: rgba(0, 0, 0, 0.75); }
+.lightbox img { display: block; max-width: 92vw; max-height: 92vh; border-radius: 8px; }
+.lightbox-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 9px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* ===== 快速开始步骤 ===== */
+.steps { counter-reset: step; margin: 1.5rem 0; padding: 0; list-style: none; }
+.steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 0 0 18px 52px;
+}
+.steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: -4px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(120deg, #0091ea, #2979ff);
+  color: #fff;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ===== 文档页 ===== */
+.docs-article { max-width: 780px; }
+.docs-article img { max-width: 100%; border: 1px solid #e1e4e8; border-radius: 8px; }
+.docs-pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e1e4e8;
+}
+.docs-pager a {
+  text-decoration: none;
+  color: #0366d6;
+  padding: 8px 14px;
+  border: 1px solid #e1e4e8;
+  border-radius: 8px;
+}
+.docs-pager a:hover { background: #f6f8fa; }
+
+/* ===== 提示框（引用块） ===== */
+.main-content blockquote {
+  border-left: 4px solid #2979ff;
+  background: #f0f7ff;
+  padding: 10px 16px;
+  border-radius: 0 8px 8px 0;
+  color: #24292f;
+}
+
+/* ===== 页脚 ===== */
+.site-footer {
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid #e1e4e8;
+}
+.footer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+@media (max-width: 768px) { .footer-grid { grid-template-columns: 1fr; } }
+.footer-grid h4 { margin: 0 0 8px; font-size: 0.95rem; }
+.footer-grid ul { margin: 0; padding-left: 18px; font-size: 0.9rem; color: #57606a; }
