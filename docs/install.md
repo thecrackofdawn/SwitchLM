@@ -14,23 +14,23 @@ next:
 
 ### 添加服务商
 
-![添加服务商](../assets/screenshots/install_guide/add_provider.png)
+![添加服务商]({{ '/assets/screenshots/install_guide/add_provider.png' | relative_url }})
 
 ### 添加模型
 
-![添加模型](../assets/screenshots/install_guide/add_model.png)
+![添加模型]({{ '/assets/screenshots/install_guide/add_model.png' | relative_url }})
 
 > ⚠️ 一定要记住添加模型：只有在这里添加了模型后，才能在路由跟故障转移页面选择到相应的模型。
 
 ### 添加路由
 
-![添加路由](../assets/screenshots/install_guide/add_router.png)
+![添加路由]({{ '/assets/screenshots/install_guide/add_router.png' | relative_url }})
 
 路由名称（如 `pro`）就是需要配置在智能体的模型名称。
 
 ### 配置失败回退
 
-![配置失败回退](../assets/screenshots/install_guide/add_fallback.png)
+![配置失败回退]({{ '/assets/screenshots/install_guide/add_fallback.png' | relative_url }})
 
 这里配置当一个模型额度耗尽后，可以回退调用其他模型。
 
