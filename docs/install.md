@@ -40,4 +40,4 @@ next:
 - **密钥存储**：建议运行 gnome-keyring / KWallet；**未安装密钥环**时首次启动会弹出对话框询问是否将访问密钥以明文存入 `~/.local/share/com.switchlm.app/secrets.json`（文件权限 0600）。同意即用文件存储，退出则不保存。
 - **不支持 headless / 无桌面服务器**（这是桌面托盘应用）。
 
-完成配置后，继续看[接入编程 Agent](/docs/agents/)。
+完成配置后，继续看[接入编程 Agent]({{ '/docs/agents/' | relative_url }})。
