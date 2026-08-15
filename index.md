@@ -51,6 +51,7 @@ SwitchLM 的核心能力：**拥有多个服务商编程套餐时，按「时间
         <li>MIT License</li>
         <li><a href="{{ site.github_repo }}">GitHub 仓库</a></li>
         <li><a href="{{ site.releases_url }}">下载发布版</a></li>
+        <li>主题：<a href="https://github.com/pages-themes/cayman">Cayman</a>（<a href="https://github.com/jasonlong">Jason Long</a>，CC0）</li>
       </ul>
     </div>
     <div>
