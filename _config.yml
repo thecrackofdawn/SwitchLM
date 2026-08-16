@@ -9,9 +9,16 @@ github_repo: https://github.com/thecrackofdawn/SwitchLM
 releases_url: https://github.com/thecrackofdawn/SwitchLM/releases
 markdown: kramdown
 permalink: pretty
+plugins:
+  - jekyll-sitemap
 exclude:
   - docs/superpowers
   - Gemfile
   - Gemfile.lock
   - CLAUDE.md
   - .superpowers
+defaults:
+  - scope:
+      path: "googlebac3b883ec177d92.html"
+    values:
+      sitemap: false
