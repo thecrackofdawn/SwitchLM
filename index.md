@@ -1,5 +1,7 @@
 ---
 layout: default
+seo_title: SwitchLM - 多编程套餐管理工具
+description: 多厂商编程套餐管理，按时间与优先级自动切换模型分发策略，最大化利用多套餐优惠
 ---
 
 ## 解决什么问题
