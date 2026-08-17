@@ -34,6 +34,7 @@ Google 搜索 SwitchLM 时，首页结果显示为「解决什么问题 | Switch
    ```yaml
    ---
    layout: default
+   title: SwitchLM
    seo_title: SwitchLM - 多编程套餐管理工具
    description: 多厂商编程套餐管理，按时间与优先级自动切换模型分发策略，最大化利用多套餐优惠
    ---
@@ -41,6 +42,7 @@ Google 搜索 SwitchLM 时，首页结果显示为「解决什么问题 | Switch
 
    - `description`：`{% seo %}` 原生支持 page 级覆盖，自动成为 meta description / og:description
    - `seo_title`：自定义字段，由布局接管 `<title>`（见下）
+   - `title`：显式声明页面标题，阻止 github-pages 自带的 jekyll-titles-from-headings 插件把 `page.title` 推导为正文首个标题「解决什么问题」（该推导正是旧版 og:title / twitter:title / JSON-LD headline 显示「解决什么问题」的原因）；声明后这些 meta 均回退品牌名「SwitchLM」。`<title>` 元素不受影响——由 `seo_title` 分支接管。注意：此行是承重的，不可省略。
 
 2. **`_layouts/default.html`** head 中，将 `{% seo %}` 替换为：
 
