@@ -13,6 +13,10 @@ use crate::proxy::health::{LocalNow, TripReason};
 use crate::proxy::resolve::resolve_model;
 use crate::proxy::strategies::model_fallback_target;
 use crate::proxy::{AppState, ProxyError};
+use crate::statistics::{
+    extract::{extract_tokens_from_json, inject_stream_options, SseTap, StreamingTokenCollector},
+    ProviderType, RecordOnce, StatEvent, TokenUsage,
+};
 use crate::translate::request::anthropic_to_openai;
 use crate::translate::response::openai_to_anthropic;
 use crate::usage::{usage_provider_for, UsageSnapshot};
@@ -32,8 +36,9 @@ pub enum ClientProtocol {
 /// Result of one upstream attempt. `RateLimited` is only ever returned before any content has
 /// been forwarded to the client (non-stream: buffered body; stream: first event).
 enum AttemptOutcome {
-    /// Forward this response to the client (success or non-rate-limit upstream error passthrough).
-    Respond(Response<Body>),
+    /// Forward this response to the client + the tokens extracted from its
+    /// buffered body ((None, None) when the vendor reported no usage).
+    Respond(Response<Body>, TokenUsage),
     /// Provider rate-limited / quota exhausted -> trip breaker + walk to fallback.
     RateLimited,
 }
@@ -300,8 +305,21 @@ async fn dispatch_non_stream(
             AttemptKind::NonStream { protocol },
             model_snap.retry_count, model_snap.retry_delay_secs,
         ).await {
-            Ok(AttemptWithRetry::Respond(resp)) => {
+            Ok(AttemptWithRetry::Respond(resp, tokens)) => {
                 outcome.served_model_id = Some(current.clone());
+                // 用量统计(spec §Service Integration):仅成功(2xx)响应计数——
+                // 错误透传(401/500)不算一次成功请求。非阻塞 channel send,
+                // 统计故障绝不影响转发。
+                if resp.status().is_success() {
+                    if let Some(stats) = &state.statistics {
+                        stats.record(
+                            &model_snap.provider_id,
+                            &model_snap.vendor,
+                            ProviderType::from_vendor(&model_snap.vendor),
+                            tokens,
+                        );
+                    }
+                }
                 return Ok(resp);
             }
             Ok(AttemptWithRetry::RateLimited(rec)) => {
@@ -413,7 +431,8 @@ async fn dispatch_stream(
             AttemptKind::Stream { path },
             snap.retry_count, snap.retry_delay_secs,
         ).await {
-            Ok(AttemptWithRetry::Respond(resp)) => {
+            // 流式 token 统计由 Task 7 的 tap 在流内完成;此处先忽略。
+            Ok(AttemptWithRetry::Respond(resp, _tokens)) => {
                 outcome.served_model_id = Some(current.clone());
                 return Ok(resp);
             }
@@ -438,13 +457,21 @@ async fn stream_attempt(
     key: &str,
     echo_model: &str,
     req_id: &str,
+    sink: &mut Option<RecordOnce>,
 ) -> Result<AttemptOutcome, ProxyError> {
-    let resp = send_stream(snap, req, path, key).await.map_err(ProxyError::Upstream)?;
+    let resp = match send_stream(snap, req, path, key).await {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(s) = sink.as_mut() { s.cancel(); }
+            return Err(ProxyError::Upstream(e));
+        }
+    };
     let vendor = snap.vendor.clone();
     let upstream_status = resp.status();
 
     // Status-level rate-limit (429 / DeepSeek 402).
     if is_rate_limit_error(&vendor, Some(upstream_status.as_u16()), "") {
+        if let Some(s) = sink.as_mut() { s.cancel(); }
         return Ok(AttemptOutcome::RateLimited);
     }
 
@@ -453,8 +480,15 @@ async fn stream_attempt(
     if !upstream_status.is_success() {
         let url = resp.url().to_string();
         let ct = resp.headers().get("content-type").cloned();
-        let bytes = resp.bytes().await.map_err(|e| ProxyError::Upstream(fmt_send_error(&e)))?;
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                if let Some(s) = sink.as_mut() { s.cancel(); }
+                return Err(ProxyError::Upstream(fmt_send_error(&e)));
+            }
+        };
         if is_rate_limit_error(&vendor, Some(upstream_status.as_u16()), &String::from_utf8_lossy(&bytes)) {
+            if let Some(s) = sink.as_mut() { s.cancel(); }
             return Ok(AttemptOutcome::RateLimited);
         }
         tracing::warn!(
@@ -462,24 +496,51 @@ async fn stream_attempt(
             status = upstream_status.as_u16(), vendor = %snap.vendor,
             url = %url, body = %body_excerpt(&bytes), "upstream non-2xx (stream)",
         );
+        // Error passthrough — not a served 2xx response, so no record.
+        if let Some(s) = sink.as_mut() { s.cancel(); }
         let mut out = Response::builder().status(upstream_status);
         if let Some(ct) = ct { out = out.header("content-type", ct); }
-        return Ok(AttemptOutcome::Respond(out.body(Body::from(bytes)).unwrap()));
+        return Ok(AttemptOutcome::Respond(out.body(Body::from(bytes)).unwrap(), (None, None)));
     }
 
     // 2xx: commit.
     match path {
-        StreamPath::Translate => match translate_stream_commit(resp.bytes_stream(), echo_model.to_string(), &vendor).await {
+        StreamPath::Translate => match translate_stream_commit(resp.bytes_stream(), echo_model.to_string(), &vendor, sink).await {
             StreamCommit::RateLimited => Ok(AttemptOutcome::RateLimited),
-            StreamCommit::Respond(r) => Ok(AttemptOutcome::Respond(r)),
-            StreamCommit::TransportErr(e) => Err(ProxyError::Upstream(e)),
+            StreamCommit::Respond(r) => Ok(AttemptOutcome::Respond(r, (None, None))),
+            StreamCommit::TransportErr(e) => {
+                if let Some(s) = sink.as_mut() { s.cancel(); }
+                Err(ProxyError::Upstream(e))
+            }
         },
         StreamPath::OpenAiPassthrough | StreamPath::AnthropicPassthrough => {
             let status = resp.status();
             let ct = resp.headers().get("content-type").cloned();
+            let upstream_proto = match path {
+                StreamPath::AnthropicPassthrough => ClientProtocol::Anthropic,
+                _ => ClientProtocol::OpenAI,
+            };
+            // Passthrough path: tap the byte stream and record with the
+            // tap's tokens when it ends.
+            let (tap, handle) = SseTap::new(upstream_proto);
+            let body_stream = tap.wrap(resp.bytes_stream());
+            let mut sink = sink.take(); // moved into the generator
+            let wrapped = async_stream::stream! {
+                let mut inner = Box::pin(body_stream);
+                while let Some(item) = inner.next().await {
+                    match item {
+                        Ok(b) => yield Ok::<_, std::io::Error>(b),
+                        Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; }
+                    }
+                }
+                if let Some(mut s) = sink.take() {
+                    s.set_tokens(handle.finish());
+                    s.send();
+                }
+            };
             let mut out = Response::builder().status(status);
             if let Some(ct) = ct { out = out.header("content-type", ct); }
-            Ok(AttemptOutcome::Respond(out.body(Body::from_stream(resp.bytes_stream())).unwrap()))
+            Ok(AttemptOutcome::Respond(out.body(Body::from_stream(wrapped)).unwrap(), (None, None)))
         }
     }
 }
@@ -489,6 +550,24 @@ enum StreamPath {
     OpenAiPassthrough,
     AnthropicPassthrough,
     Translate,
+}
+
+/// Build the streaming statistics sink for one dispatch attempt. When the
+/// service is wired, this is an armed `RecordOnce` whose Drop would fire a
+/// (None, None) record; the stream body moves it in, fills real tokens via
+/// the tap, and sends on completion. When the service is absent, `None`.
+fn make_stream_sink(state: &AppState, snap: &ModelSnapshot) -> Option<RecordOnce> {
+    state.statistics.as_ref().map(|stats| {
+        RecordOnce::new(
+            stats.sender(),
+            StatEvent::Record {
+                provider_id: snap.provider_id.clone(),
+                vendor: snap.vendor.clone(),
+                provider_type: ProviderType::from_vendor(&snap.vendor),
+                tokens: (None, None),
+            },
+        )
+    })
 }
 
 /// Outcome of peeking a translate stream's first event.
@@ -526,18 +605,21 @@ async fn send_stream(
             let mut fwd = req.clone();
             fwd["model"] = serde_json::Value::String(upstream.clone());
             fwd["stream"] = serde_json::Value::Bool(true);
+            inject_stream_options(&mut fwd); // 统计需要 usage chunk(spec §stream_options 注入)
             (serde_json::to_vec(&fwd).unwrap_or_default(), join_url(snap.openai_base_url.as_deref().unwrap(), BackendProtocol::OpenAI))
         }
         StreamPath::AnthropicPassthrough => {
             let mut fwd = req.clone();
             fwd["model"] = serde_json::Value::String(upstream.clone());
             fwd["stream"] = serde_json::Value::Bool(true);
+            // 绝不注入:Anthropic 协议没有 stream_options(不变量)。
             (serde_json::to_vec(&fwd).unwrap_or_default(), join_url(snap.anthropic_base_url.as_deref().unwrap(), BackendProtocol::Anthropic))
         }
         StreamPath::Translate => {
             let mut oai = anthropic_to_openai(req);
             oai["model"] = serde_json::Value::String(upstream.clone());
             oai["stream"] = serde_json::Value::Bool(true);
+            inject_stream_options(&mut oai); // 同上
             (serde_json::to_vec(&oai).unwrap_or_default(), join_url(snap.openai_base_url.as_deref().unwrap(), BackendProtocol::OpenAI))
         }
     };
@@ -555,29 +637,48 @@ async fn send_stream(
 /// any content forwarded) -> `RateLimited` (caller trips + falls back). Otherwise commit: feed the
 /// first event to the translator, then stream the rest. Realizes §3.5's boundary for the Claude
 /// Code (Anthropic -> OpenAI translate) path.
+///
+/// `sink` is the streaming statistics guard. On a 2xx commit it is moved into the
+/// response body stream, a `StreamingTokenCollector` is fed each parsed chunk
+/// alongside `t.ingest`, and when the stream ends the sink fires with the
+/// collected tokens. On a rate-limit or transport error the sink is cancelled
+/// so Drop does not emit a false record (Task 7).
 async fn translate_stream_commit(
     upstream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     echo_model: String,
     vendor: &str,
+    sink: &mut Option<RecordOnce>,
 ) -> StreamCommit {
     let mut sse = Box::pin(upstream.eventsource());
     let first = match sse.next().await {
-        None => return StreamCommit::Respond(empty_sse_response()),
-        Some(Err(e)) => return StreamCommit::TransportErr(e.to_string()),
+        None => {
+            if let Some(s) = sink.as_mut() { s.cancel(); }
+            return StreamCommit::Respond(empty_sse_response());
+        }
+        Some(Err(e)) => {
+            if let Some(s) = sink.as_mut() { s.cancel(); }
+            return StreamCommit::TransportErr(e.to_string());
+        }
         Some(Ok(ev)) => ev,
     };
 
     if sse_event_is_rate_limit(vendor, &first.data) {
+        if let Some(s) = sink.as_mut() { s.cancel(); }
         return StreamCommit::RateLimited;
     }
 
     let mut t = crate::translate::stream::StreamTranslator::new(echo_model);
-    let first_frames: Vec<String> = if first.data == "[DONE]" {
-        t.ingest(None)
+    // Translate path: upstream protocol is OpenAI (anthropic_to_openai produced
+    // the request, so the upstream speaks OpenAI).
+    let mut collector = StreamingTokenCollector::new(ClientProtocol::OpenAI);
+    let first_chunk: Option<serde_json::Value> = if first.data == "[DONE]" {
+        None
     } else {
-        let chunk: serde_json::Value = serde_json::from_str(&first.data).unwrap_or_default();
-        t.ingest(Some(&chunk))
+        Some(serde_json::from_str(&first.data).unwrap_or_default())
     };
+    let first_frames: Vec<String> = t.ingest(first_chunk.as_ref());
+    if let Some(c) = &first_chunk { let _ = collector.ingest(c); }
+    let mut sink = sink.take(); // moved into the generator
     let stream = async_stream::stream! {
         for f in first_frames {
             yield Ok::<_, std::io::Error>(Bytes::from(f));
@@ -592,6 +693,7 @@ async fn translate_stream_commit(
                         break;
                     }
                     let chunk: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
+                    let _ = collector.ingest(&chunk);
                     for f in t.ingest(Some(&chunk)) {
                         yield Ok(Bytes::from(f));
                     }
@@ -601,6 +703,10 @@ async fn translate_stream_commit(
                     break;
                 }
             }
+        }
+        if let Some(mut s) = sink.take() {
+            s.set_tokens(collector.tokens());
+            s.send();
         }
     };
     StreamCommit::Respond(
@@ -717,6 +823,7 @@ async fn openai_passthrough(
     }
 
     let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let tokens = extract_tokens_from_json(&v, ClientProtocol::OpenAI);
     let body = if v.is_object() {
         v["model"] = serde_json::Value::String(echo_model.to_string());
         Body::from(serde_json::to_vec(&v).unwrap_or_else(|_| bytes.to_vec()))
@@ -729,6 +836,7 @@ async fn openai_passthrough(
     }
     Ok(AttemptOutcome::Respond(
         out.body(body).map_err(|e| ProxyError::Upstream(e.to_string()))?,
+        tokens,
     ))
 }
 
@@ -767,6 +875,7 @@ async fn anthropic_passthrough(
 
     let mut v: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    let tokens = extract_tokens_from_json(&v, ClientProtocol::Anthropic);
     if v.is_object() {
         v["model"] = serde_json::Value::String(echo_model.to_string());
     }
@@ -776,6 +885,7 @@ async fn anthropic_passthrough(
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&v).unwrap_or_default()))
             .unwrap(),
+        tokens,
     ))
 }
 
@@ -815,6 +925,8 @@ async fn translate_via_openai(
 
     let oai_resp: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    // 按"上游协议"提取(此处上游是 OpenAI,尽管客户端收到 Anthropic)— spec §Protocol note。
+    let tokens = extract_tokens_from_json(&oai_resp, ClientProtocol::OpenAI);
     let an = openai_to_anthropic(&oai_resp, echo_model);
     Ok(AttemptOutcome::Respond(
         Response::builder()
@@ -822,6 +934,7 @@ async fn translate_via_openai(
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&an).unwrap_or_default()))
             .unwrap(),
+        tokens,
     ))
 }
 
@@ -973,7 +1086,7 @@ enum AttemptKind {
 /// all in-place retries, carrying the `Recover` decided once on the first rate-limit (so the
 /// caller trips the breaker with it without re-querying quota). Spec §4.2.
 enum AttemptWithRetry {
-    Respond(Response<Body>),
+    Respond(Response<Body>, TokenUsage),
     RateLimited(Recover),
 }
 
@@ -1003,16 +1116,23 @@ async fn attempt_with_retry(
     let mut attempt: u32 = 0;
     let mut first_rec: Option<Recover> = None;
     loop {
+        // Build a fresh streaming sink per attempt so a cancelled sink from a
+        // prior rate-limited retry does not silently discard the successful
+        // fallback's tokens (each hop gets its own armed RecordOnce).
+        let mut stream_sink = match kind {
+            AttemptKind::Stream { .. } => make_stream_sink(state, snap),
+            AttemptKind::NonStream { .. } => None,
+        };
         let outcome = match kind {
             AttemptKind::NonStream { protocol } => {
                 select_and_call(snap, req, protocol, echo_model, key).await?
             }
             AttemptKind::Stream { path } => {
-                stream_attempt(snap, req, path, key, echo_model, req_id).await?
+                stream_attempt(snap, req, path, key, echo_model, req_id, &mut stream_sink).await?
             }
         };
         match outcome {
-            AttemptOutcome::Respond(r) => return Ok(AttemptWithRetry::Respond(r)),
+            AttemptOutcome::Respond(r, t) => return Ok(AttemptWithRetry::Respond(r, t)),
             AttemptOutcome::RateLimited => {
                 // Decide transient vs exhausted exactly once; reuse for every retry + final trip.
                 let rec = if attempt == 0 {
@@ -1056,6 +1176,7 @@ async fn usage_snapshot_realtime(state: &AppState, snap: &ModelSnapshot, now: i6
     match provider.query(key.as_deref(), usage_creds.as_ref(), &base_url).await {
         Ok(usage) => {
             state.usage_cache.set(&snap.provider_id, usage.clone(), now);
+            state.notify_usage_snapshot(&snap.provider_id, &usage);
             Some(usage)
         }
         Err(_) => None,
@@ -1207,12 +1328,14 @@ mod tests {
     }
 
     /// Build state with a chain m_a -> m_b? -> m_c?, profile "glm-5.2" -> m_a, all on provider
-    /// "zhipu" (key "sk-test"). `FakeClock` fixed at epoch 1000.
+    /// "zhipu" (key "sk-test"). `FakeClock` fixed at epoch 1000. `stats` attaches a live
+    /// statistics service (tests assert DB state); `None` keeps statistics off.
     async fn chain_state(
         clock: Arc<dyn Clock>,
         a: &str,
         b: Option<&str>,
         c: Option<&str>,
+        stats: Option<Arc<crate::statistics::UsageStatisticsService>>,
     ) -> AppState {
         let mut cfg = AppConfig::default();
         let secrets = SecretStoreHandle::new(Arc::new(MemoryStore::default()), BackendKind::Keyring);
@@ -1260,6 +1383,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: stats,
         })
     }
 
@@ -1285,6 +1409,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
         let snap = snapshot_model(&state, "m_a").await.unwrap();
         assert_eq!(snap.provider_id, "prov_abc"); // opaque key preserved
@@ -1313,6 +1438,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
         assert_eq!(model_tag(&state, "m_a").await, "zhipu/m_a");
         assert_eq!(model_tag(&state, "m_missing").await, "unknown/m_missing");
@@ -1350,7 +1476,7 @@ mod tests {
             ))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
 
@@ -1378,7 +1504,7 @@ mod tests {
             ))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         assert!(state.last_served_provider.lock().unwrap().is_none()); // nothing served yet
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
@@ -1399,7 +1525,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"message":"rate limited"}})))
                 .mount(m).await;
         }
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         let app = build_router(state.clone());
         let _ = app.oneshot(oai_post()).await.unwrap();
         assert!(state.last_served_provider.lock().unwrap().is_none()); // unchanged
@@ -1416,7 +1542,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"message":"rate limited"}})))
                 .mount(m).await;
         }
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), Some(&mock_c.uri())).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), Some(&mock_c.uri()), None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
 
@@ -1439,7 +1565,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x"})))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
 
@@ -1506,6 +1632,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
 
         let app = build_router(state.clone());
@@ -1530,7 +1657,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"from-b"}}]})))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         state.health.trip("m_a", Some(2000), 1000, TripReason::Transient); // pre-trip a
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
@@ -1574,6 +1701,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
 
         let app = build_router(state.clone());
@@ -1621,7 +1749,7 @@ mod tests {
             )
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
 
@@ -1652,7 +1780,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x"})))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
 
@@ -1718,6 +1846,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
 
         let app = build_router(state.clone());
@@ -1744,7 +1873,7 @@ mod tests {
             ))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
 
@@ -1752,6 +1881,224 @@ mod tests {
         let body = body_str(resp).await;
         assert!(body.contains("invalid api key")); // upstream error body preserved (and logged)
         assert!(!state.health.is_cooling("m_a", 1000)); // not tripped (non-rate-limit)
+    }
+
+    // ---- Task 6: non-streaming token statistics ----
+
+    /// Poll the statistics service until `provider_id`'s row appears (record is
+    /// async via the writer thread; mirrors Task 3's polling pattern).
+    async fn stats_of(state: &AppState, provider_id: &str) -> crate::statistics::ProviderStats {
+        let svc = state.statistics.as_ref().unwrap();
+        for _ in 0..200 {
+            let all = futures::executor::block_on(svc.get_all_stats()).unwrap_or_default();
+            if let Some(s) = all.into_iter().find(|s| s.provider_id == provider_id) {
+                return s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("stats for {provider_id} never appeared");
+    }
+
+    #[tokio::test]
+    async fn non_stream_records_tokens_for_served_provider() {
+        let mock_a = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}],
+                                   "usage":{"prompt_tokens":150,"completion_tokens":250,"total_tokens":400}}),
+            ))
+            .mount(&mock_a).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let s = stats_of(&state, "zhipu").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 150);
+        assert_eq!(s.total_output_tokens, 250);
+    }
+
+    #[tokio::test]
+    async fn non_stream_without_usage_records_request_only() {
+        let mock_a = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}),
+            ))
+            .mount(&mock_a).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let _ = app.oneshot(oai_post()).await.unwrap();
+        let s = stats_of(&state, "zhipu").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_tokenized_requests, 0); // RequestsOnly
+    }
+
+    #[tokio::test]
+    async fn upstream_error_response_not_counted() {
+        // "Successful requests only": a 401 passthrough must not be recorded.
+        let mock_a = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({"error":"no"})))
+            .mount(&mock_a).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(state.statistics.as_ref().unwrap().try_stats().map(|s| s.is_empty()).unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn fallback_credits_serving_provider() {
+        // m_a 429 → m_b serves: the RECORD must land on pb (the provider that
+        // actually served), not zhipu (spec §Non-streaming integration point).
+        let mock_a = MockServer::start().await;
+        let mock_b = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"code":1302}})))
+            .mount(&mock_a).await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"from-b"}}],
+                                   "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}),
+            ))
+            .mount(&mock_b).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let s = stats_of(&state, "pb").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 10);
+        // zhipu was rate-limited, never served → no row.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let all = futures::executor::block_on(state.statistics.as_ref().unwrap().get_all_stats()).unwrap();
+        assert!(all.iter().all(|x| x.provider_id != "zhipu"));
+    }
+
+    // ---- Task 7: streaming token statistics (tap + injection) ----
+
+    #[tokio::test]
+    async fn stream_records_tokens_via_translate_path() {
+        // Anthropic client → OpenAI upstream (translate): usage chunk in the
+        // OpenAI stream must be collected even though the client sees Anthropic.
+        let mock_a = MockServer::start().await;
+        let sse = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n\
+                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":50}}\n\n\
+                   data: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(sse.as_bytes().to_vec()),
+            )
+            .mount(&mock_a).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_str(resp).await; // drain the stream so the tap completes
+        let s = stats_of(&state, "zhipu").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 25);
+        assert_eq!(s.total_output_tokens, 50);
+    }
+
+    #[tokio::test]
+    async fn stream_sends_include_usage_upstream() {
+        // The proxy must inject stream_options.include_usage on OpenAI-family
+        // streaming upstream requests (clients never send it themselves).
+        let mock_a = MockServer::start().await;
+        let sse = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n\
+                   data: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(sse.as_bytes().to_vec()),
+            )
+            .mount(&mock_a).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_stream_post()).await.unwrap();
+        let _ = body_str(resp).await;
+        let reqs = mock_a.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["stream_options"]["include_usage"], serde_json::json!(true));
+    }
+
+    fn oai_stream_post() -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// Regression: `make_stream_sink` must be rebuilt per retry hop inside
+    /// `attempt_with_retry`. Before the fix, hop 1's 429 cancelled the shared
+    /// `RecordOnce`; hop 2's successful stream then retrieved the cancelled
+    /// sink and `send()` was a no-op — the fallback's tokens were silently lost.
+    #[tokio::test]
+    async fn stream_fallback_after_rate_limit_records_tokens() {
+        let mock_a = MockServer::start().await;
+        let mock_b = MockServer::start().await;
+        // A: 429 with 智谱 rate-limit code 1302 → trips breaker, falls back.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"code":1302}})))
+            .mount(&mock_a).await;
+        // B: 200 streaming with usage chunk (OpenAI-family).
+        let sse = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n\
+                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":50}}\n\n\
+                   data: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(sse.as_bytes().to_vec()),
+            )
+            .mount(&mock_b).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, Some(stats)).await;
+        let app = build_router(state.clone());
+        let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_str(resp).await; // drain the stream so the tap completes
+        // Tokens must land on pb (the fallback that actually served), not zhipu.
+        let s = stats_of(&state, "pb").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 25);
+        assert_eq!(s.total_output_tokens, 50);
+        // zhipu (the rate-limited primary) must have no record.
+        let all = state.statistics.as_ref().unwrap().get_all_stats().await.unwrap_or_default();
+        assert!(all.iter().all(|x| x.provider_id != "zhipu"));
     }
 
     // ---- compute_recover_at: quota-exhausted vs transient-throttle ----
@@ -1862,7 +2209,7 @@ mod tests {
             })))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY); // no fallback -> FallbackExhausted
@@ -1886,7 +2233,7 @@ mod tests {
             })))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
@@ -1958,7 +2305,7 @@ mod tests {
                 serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"from-a"}}]})))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         // mk_model defaults retry_count:0 (see Step 8); enable retry on m_a for this test.
         {
             let mut cfg = state.config.write().await;
@@ -1988,7 +2335,7 @@ mod tests {
                 serde_json::json!({"id":"x","choices":[{"message":{"role":"assistant","content":"from-b"}}]})))
             .mount(&mock_b).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), Some(&mock_b.uri()), None, None).await;
         {
             let mut cfg = state.config.write().await;
             let a = cfg.models.iter_mut().find(|m| m.id == "m_a").unwrap();
@@ -2019,7 +2366,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({"error":"unauthorized"})))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         {
             let mut cfg = state.config.write().await;
             let a = cfg.models.iter_mut().find(|m| m.id == "m_a").unwrap();
@@ -2051,7 +2398,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_bytes(sse_ok.as_bytes().to_vec()))
             .mount(&mock_a).await;
 
-        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None).await;
+        let state = chain_state(Arc::new(FakeClock::new(1000)), &mock_a.uri(), None, None, None).await;
         {
             let mut cfg = state.config.write().await;
             let a = cfg.models.iter_mut().find(|m| m.id == "m_a").unwrap();
@@ -2106,6 +2453,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2200,6 +2548,7 @@ mod tests {
                 polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
             });
             let app = build_router(state.clone());
             let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2277,6 +2626,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();

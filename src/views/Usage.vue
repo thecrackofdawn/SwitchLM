@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { NButton, NCard, NEmpty, NProgress, NSpace, NTag, NTooltip, useMessage } from "naive-ui";
 import { useConfigStore } from "../stores/config";
 import { useRuntimeStore } from "../stores/runtime";
 import { useSystemStore } from "../stores/system";
-import { DEFAULT_USAGE_REFRESH_SECS, MIN_USAGE_REFRESH_SECS, type UsageEntry } from "../lib/types";
+import { DEFAULT_USAGE_REFRESH_SECS, MIN_USAGE_REFRESH_SECS, type ProviderStats, type StatWindow, type UsageEntry } from "../lib/types";
 import draggable from "vuedraggable";
 import { usePolling } from "../lib/usePolling";
 import { vendorLabel } from "../lib/selectLabel";
@@ -24,6 +24,7 @@ const windows = [
 ] as const;
 
 interface TierRow {
+  key: string;   // "five_hour" | "weekly_limit" | "monthly" — joins to ProviderStats
   label: string;
   pct: number | null;
   reset: number | null;
@@ -45,11 +46,28 @@ const cards = computed<UsageCard[]>(() =>
       vendor: provider?.vendor ?? null,
       rows: windows.map((w) => {
         const t = entry.snapshot?.tiers?.find((x) => x.window === w.key);
-        return { label: w.label, pct: t?.used_pct ?? null, reset: t?.reset_at ?? null };
+        return { key: w.key, label: w.label, pct: t?.used_pct ?? null, reset: t?.reset_at ?? null };
       }),
     };
   }),
 );
+
+/** 窗口 key(与后端 tiers 一致)→ stats 字段。 */
+function statsWindow(stats: ProviderStats | undefined, key: string): StatWindow | null {
+  if (!stats) return null;
+  const w = key === "five_hour" ? stats.last_5h : key === "weekly_limit" ? stats.last_1w : stats.last_1m;
+  return w.is_active ? w : null;
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
+
+function findStats(providerId: string): ProviderStats | undefined {
+  return runtime.stats.find((s) => s.provider_id === providerId);
+}
 
 // Config-backed drag order (single source of truth shared with tray + 概览). Local `ordered`
 // updates instantly for a responsive drag; persistence is debounced to coalesce rapid reorder
@@ -124,9 +142,39 @@ function fmtBalance(n: number): string {
 function status(p: number): "success" | "warning" | "error" {
   return p >= 90 ? "error" : p >= 70 ? "warning" : "success";
 }
-function resetLabel(at: number | null): string {
-  return at != null ? new Date(at * 1000).toLocaleString() : "-";
+/** 重置时间的完整精确表示（悬浮展示用），如 2026/8/15 16:10:09。 */
+function resetFull(at: number | null): string {
+  if (at == null) return "-";
+  const d = new Date(at * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+/** 重置时间的动态/相对表示：
+ *  < 24h → "2小时10分后重置"；> 1天 → "8月17日重置"；过期 → "已重置"。
+ *  依赖 `now` ref 每分钟重算（见下方 nowTick）。 */
+function resetRelative(at: number | null, now: number): string {
+  if (at == null) return "-";
+  const diffSec = Math.floor(at - now / 1000);
+  if (diffSec <= 0) return "已重置";
+  if (diffSec < 60) return `${diffSec}秒后重置`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}分后重置`;
+  if (diffSec < 86_400) {
+    const h = Math.floor(diffSec / 3600);
+    const m = Math.floor((diffSec % 3600) / 60);
+    return m > 0 ? `${h}小时${m}分后重置` : `${h}小时后重置`;
+  }
+  const d = new Date(at * 1000);
+  return `${d.getMonth() + 1}月${d.getDate()}日重置`;
+}
+/** 当前时间戳（ms），每分钟跳动一次，驱动 resetRelative 重算。 */
+const now = ref(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  nowTimer = setInterval(() => (now.value = Date.now()), 60_000);
+});
+onUnmounted(() => {
+  if (nowTimer) clearInterval(nowTimer);
+});
 /** 格式化套餐起始时间：ISO "2026-07-30T00:00:00+08:00" -> "2026-07-30 00:00"
  *  （截取前 16 字符、T 换空格，保留原时区表示，避免按本地时区偏移）。 */
 function fmtPlanTime(iso?: string | null): string {
@@ -220,6 +268,22 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
               <span class="balance-row__label">余额</span>
               <span class="balance-row__value mono">{{ c.snapshot.unit }} {{ fmtBalance(c.snapshot.remaining ?? 0) }}</span>
             </div>
+            <div v-if="findStats(c.provider_id)" class="balance-row">
+              <span class="balance-row__label">累计消耗</span>
+              <NTooltip>
+                <template #trigger>
+                  <span class="balance-row__value mono">
+                    {{ fmtNum(findStats(c.provider_id)!.total_tokens) }}
+                    <span class="tier__stat-unit">token</span>
+                  </span>
+                </template>
+                <div style="display: flex; flex-direction: column; gap: 2px">
+                  <span>输入：{{ fmtNum(findStats(c.provider_id)!.total_input_tokens) }} token</span>
+                  <span>输出：{{ fmtNum(findStats(c.provider_id)!.total_output_tokens) }} token</span>
+                  <span>请求：{{ fmtNum(findStats(c.provider_id)!.total_requests) }} 次</span>
+                </div>
+              </NTooltip>
+            </div>
           </template>
 
           <!-- Plan billing (default): tier windows with progress bars -->
@@ -229,12 +293,46 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
               <template v-if="row.pct != null">
                 <span class="tier__pct mono">{{ fmtPct(row.pct) }}%</span>
                 <NProgress
-                  class="tier__bar"
+                  class="tier__bar tier__bar--short"
                   :percentage="fmtPct(row.pct)"
                   :status="status(row.pct)"
                   :show-indicator="false"
                 />
-                <span class="tier__reset mono">重置时间 {{ resetLabel(row.reset) }}</span>
+                <!-- 本机统计:token 消耗(悬浮显示输入/输出拆分) + 请求次数 -->
+                <template v-if="statsWindow(findStats(c.provider_id), row.key)">
+                  <NTooltip>
+                    <template #trigger>
+                      <span class="tier__stat mono" title="token 消耗（本机统计）">
+                        {{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.input_tokens +
+                                  statsWindow(findStats(c.provider_id), row.key)!.output_tokens) }}
+                        <span class="tier__stat-unit">token</span>
+                      </span>
+                    </template>
+                    <div style="display: flex; flex-direction: column; gap: 2px">
+                      <span>输入：{{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.input_tokens) }} token</span>
+                      <span>输出：{{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.output_tokens) }} token</span>
+                      <span v-if="statsWindow(findStats(c.provider_id), row.key)!.requests > 0">
+                        请求：{{ statsWindow(findStats(c.provider_id), row.key)!.requests }} 次
+                      </span>
+                    </div>
+                  </NTooltip>
+                  <NTooltip>
+                    <template #trigger>
+                      <span class="tier__stat mono" title="请求次数（本机统计）">
+                        {{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.requests) }}
+                        <span class="tier__stat-unit">次</span>
+                      </span>
+                    </template>
+                    <div>本窗口期成功请求次数</div>
+                  </NTooltip>
+                </template>
+                <NTooltip v-if="row.reset != null">
+                  <template #trigger>
+                    <span class="tier__reset mono">{{ resetRelative(row.reset, now) }}</span>
+                  </template>
+                  <div>重置时间：{{ resetFull(row.reset) }}</div>
+                </NTooltip>
+                <span v-else class="tier__reset mono">重置时间 -</span>
               </template>
               <span v-else class="tier__na">N/A</span>
             </div>
@@ -243,6 +341,11 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
 
         <div v-if="c.snapshot?.raw_summary && c.snapshot?.billing_model !== 'consumption'" class="mono raw">
           原始返回：{{ c.snapshot.raw_summary }}
+        </div>
+
+        <div v-if="findStats(c.provider_id)" class="lifetime mono">
+          累计消耗：{{ fmtNum(findStats(c.provider_id)!.total_tokens) }} token ·
+          {{ fmtNum(findStats(c.provider_id)!.total_requests) }} 次请求
         </div>
       </NSpace>
     </NCard>
@@ -302,6 +405,20 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
   flex: 1 1 auto;
   min-width: 60px;
 }
+.tier__bar--short {
+  flex: 1 1 auto; /* fill the space left over by the fixed-width stats + reset time */
+  min-width: 120px;
+}
+.tier__stat {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--sl-text-2);
+  white-space: nowrap;
+}
+.tier__stat-unit {
+  font-size: 11px;
+  color: var(--sl-text-3);
+}
 .tier__reset {
   flex-shrink: 0;
   font-size: 12px;
@@ -324,5 +441,9 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
 }
 .balance-row__value {
   font-weight: 600;
+}
+.lifetime {
+  font-size: 12px;
+  color: var(--sl-text-3);
 }
 </style>

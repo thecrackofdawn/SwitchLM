@@ -59,6 +59,7 @@ mod tests {
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics: None,
         })
     }
 

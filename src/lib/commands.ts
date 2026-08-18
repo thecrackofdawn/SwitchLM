@@ -11,6 +11,7 @@ import type {
   ModelHealth,
   Profile,
   Provider,
+  ProviderStats,
   RouteEffective,
   SecretStatusView,
   ServerStatus,
@@ -115,6 +116,7 @@ export const clearQianwenCookie = (providerId: string) =>
 // ---- usage + health ----
 export const getUsage = (providerId: string) => invoke<UsageSnapshot>("get_usage", { providerId });
 export const getAllUsage = () => invoke<UsageEntry[]>("get_all_usage");
+export const getUsageStatistics = () => invoke<ProviderStats[]>("get_usage_statistics");
 export const getModelHealth = () => invoke<Record<string, ModelHealth>>("get_model_health");
 export const getProviderUsageUrl = (providerId: string) => invoke<string | null>("get_provider_usage_url", { providerId });
 

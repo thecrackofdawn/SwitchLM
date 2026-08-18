@@ -46,6 +46,7 @@ async fn state_with_recording(upstream: &str, recdir: &std::path::Path) -> (AppS
         polling_handle: std::sync::Mutex::new(None),
         last_served_provider: std::sync::Mutex::new(None),
         recorder: std::sync::RwLock::new(Some(rec.clone())),
+        statistics: None,
     });
     (state, rec)
 }

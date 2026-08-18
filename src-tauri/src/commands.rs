@@ -146,6 +146,10 @@ pub async fn delete_provider(
     if let Err(e) = state.secrets.delete_usage_cookie(&provider_id) {
         tracing::warn!("delete_provider: failed to purge usage_cookie for {provider_id}: {e}");
     }
+    // 级联删除统计行(跨文件 FK 不可行,显式消息代替 — spec §Database Schema)。
+    if let Some(stats) = &state.statistics {
+        stats.delete_provider(&provider_id);
+    }
     Ok(())
 }
 
@@ -480,6 +484,17 @@ pub async fn get_usage(
     provider_id: String,
 ) -> Result<UsageSnapshot, String> {
     query_usage(&state, &provider_id).await
+}
+
+/// 每服务商用量统计(请求次数 + token 消耗)。统计禁用时返回空数组。
+#[tauri::command]
+pub async fn get_usage_statistics(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::statistics::ProviderStats>, String> {
+    match &state.statistics {
+        Some(s) => s.get_all_stats().await,
+        None => Ok(Vec::new()),
+    }
 }
 
 /// One usage entry per configured provider (ok or error), for tray/usage-page rendering.
@@ -1154,6 +1169,7 @@ pub(crate) async fn query_usage(state: &AppState, provider_id: &str) -> Result<U
         .await
         .map_err(|e| e.to_string())?;
     state.usage_cache.set(provider_id, snap.clone(), now);
+    state.notify_usage_snapshot(provider_id, &snap);
     Ok(snap)
 }
 
@@ -2063,5 +2079,60 @@ mod tests {
         // disable → drops Arc → recorder None
         *state.recorder.write().unwrap() = None;
         assert!(state.recorder.read().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn query_usage_notifies_statistics_reset() {
+        // A usage query that returns a snapshot must forward it to the
+        // statistics service (the reset choke point) — spec §Reset trigger source.
+        use crate::config::{AppConfig, BackendKind, MemoryStore, Profile, Provider, SecretStoreHandle};
+        use crate::proxy::state::AppStateInner;
+        use crate::proxy::AppState;
+        use crate::usage::{UsageSnapshot, UsageTier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(
+            dir.path(), std::sync::Arc::new(crate::proxy::health::FakeClock::new(1000)),
+        ).unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.providers.push(Provider {
+            id: "p1".into(), vendor: "zhipu".into(), display_name: "智谱".into(),
+            openai_base_url: Some("https://x/v1".into()), anthropic_base_url: None, usage_creds: None,
+        });
+        cfg.profiles.push(Profile {
+            id: "p".into(), name: "glm-4.6".into(), aliases: vec![],
+            backing_model_id: "m".into(), ..Default::default()
+        });
+        let state: AppState = std::sync::Arc::new(AppStateInner {
+            config: tokio::sync::RwLock::new(cfg),
+            catalog: Default::default(),
+            secrets: SecretStoreHandle::new(std::sync::Arc::new(MemoryStore::default()), BackendKind::Keyring),
+            health: Default::default(),
+            clock: std::sync::Arc::new(crate::proxy::health::FakeClock::new(1000)),
+            usage_cache: Default::default(),
+            bound_port: std::sync::Mutex::new(None),
+            server_handle: std::sync::Mutex::new(None),
+            bind_error: std::sync::Mutex::new(None),
+            polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
+            statistics: Some(stats.clone()),
+        });
+        let snapshot = UsageSnapshot {
+            total: None, remaining: None, reset_at: None, unit: "%".into(),
+            raw_summary: None, plan: None, billing_model: "plan".into(), plan_info: None,
+            tiers: vec![UsageTier { window: "five_hour".into(), used_pct: Some(10.0), reset_at: Some(5000) }],
+        };
+        state.notify_usage_snapshot("p1", &snapshot);
+        for _ in 0..200 {
+            let all = futures::executor::block_on(stats.get_all_stats()).unwrap_or_default();
+            if let Some(s) = all.into_iter().find(|s| s.provider_id == "p1") {
+                assert_eq!(s.last_5h.reset_at, Some(5000));
+                assert!(s.last_5h.is_active);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("reset never applied");
     }
 }

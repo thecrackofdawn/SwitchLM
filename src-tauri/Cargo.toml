@@ -36,6 +36,7 @@ chrono = "0.4"
 sha2 = "0.10"
 hmac = "0.12"
 fastrand = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # 后端按目标 OS 叠加 feature：基础版本见上，每个 target 段补一个原生后端。
 # Linux 用 linux-native-sync-persistent（dbus-secret-service，纯 Rust，仅需 libdbus-1）。

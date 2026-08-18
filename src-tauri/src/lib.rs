@@ -4,6 +4,7 @@ pub mod config;
 mod idle_destroy;
 pub mod proxy;
 pub mod recording;
+pub mod statistics;
 pub mod translate;
 pub mod tray;
 pub mod usage;
@@ -171,6 +172,13 @@ pub fn run() {
                 polling_handle: Mutex::new(None),
                 last_served_provider: Mutex::new(None),
                 recorder: std::sync::RwLock::new(recorder),
+                // 统计 DB 打开失败 → None(功能禁用,绝不阻断启动)。
+                statistics: crate::statistics::UsageStatisticsService::start(
+                    &dir,
+                    Arc::new(proxy::SystemClock),
+                )
+                .inspect_err(|e| tracing::warn!("statistics DB unavailable, usage stats disabled: {e}"))
+                .ok(),
             });
 
             let state_for_server = state.clone();
@@ -248,6 +256,7 @@ pub fn run() {
             qianwen_login::open_qianwen_login,
             qianwen_login::finish_qianwen_login,
             commands::get_usage,
+            commands::get_usage_statistics,
             commands::get_all_usage,
             commands::get_fallback_map,
             commands::set_model_fallback,

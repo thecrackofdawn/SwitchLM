@@ -44,6 +44,9 @@ pub struct AppStateInner {
     /// 请求记录器(`None` = 记录关闭,零开销)。RwLock 以便 set_request_recording 热切换。
     /// 见 spec §3/§8。
     pub recorder: std::sync::RwLock<Option<std::sync::Arc<RequestRecorder>>>,
+    /// 用量统计服务(`None` = 启动时 DB 打开失败或测试环境,统计禁用,零开销)。
+    /// 仿 `recorder` 的 Option 模式:dispatch 各路径判 None 直接跳过。
+    pub statistics: Option<std::sync::Arc<crate::statistics::UsageStatisticsService>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -55,6 +58,13 @@ impl AppStateInner {
             store::save(dir, &cfg)?;
         }
         let catalog = RwLock::new(ensure_catalog(dir));
+        // 统计 DB 打开失败 → None(功能禁用,绝不阻断启动)。
+        let statistics = crate::statistics::UsageStatisticsService::start(
+            dir,
+            Arc::new(SystemClock),
+        )
+        .inspect_err(|e| tracing::warn!("statistics DB unavailable, usage stats disabled: {e}"))
+        .ok();
         Ok(Self {
             config: RwLock::new(cfg),
             catalog,
@@ -68,6 +78,7 @@ impl AppStateInner {
             polling_handle: Mutex::new(None),
             last_served_provider: Mutex::new(None),
             recorder: std::sync::RwLock::new(None),
+            statistics,
         })
     }
 
@@ -172,6 +183,14 @@ impl AppStateInner {
     /// Get binding error
     pub fn get_bind_error(&self) -> Option<String> {
         self.bind_error.lock().unwrap().clone()
+    }
+
+    /// Usage 查询的统一旁路钩子(spec §Reset):任何来源(前端轮询/托盘/断路器
+    /// 实时查询)拿到新快照后都调用本方法,由统计服务判定窗口重置。
+    pub fn notify_usage_snapshot(&self, provider_id: &str, snapshot: &crate::usage::UsageSnapshot) {
+        if let Some(s) = &self.statistics {
+            s.notify_usage_snapshot(provider_id, snapshot);
+        }
     }
 }
 

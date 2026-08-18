@@ -116,6 +116,35 @@ export interface UsageEntry {
   error?: string | null;
 }
 
+/** 每服务商用量统计(和 Rust statistics::WindowStats 镜像,snake_case)。 */
+export interface StatWindow {
+  requests: number;
+  tokenized_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  reset_at: number | null;
+  is_active: boolean;
+  /** 服务端从 tokenized/requests 派生:"Full" | "RequestsOnly" | "Unknown" */
+  quality: "Full" | "RequestsOnly" | "Unknown";
+  /** 部分覆盖时为百分比(0 < tokenized < requests),否则 null */
+  coverage_pct: number | null;
+}
+
+/** 每服务商用量统计(和 Rust statistics::ProviderStats 镜像,snake_case)。 */
+export interface ProviderStats {
+  provider_id: string;
+  vendor: string;
+  provider_type: "plan" | "consumption";
+  last_5h: StatWindow;
+  last_1w: StatWindow;
+  last_1m: StatWindow;
+  total_requests: number;
+  total_tokenized_requests: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+}
+
 export interface ModelHealth {
   cooling_down: boolean;
   recover_at?: number | null;
