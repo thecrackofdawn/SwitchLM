@@ -68,21 +68,27 @@ fn tier_summary(u: &UsageSnapshot) -> Option<String> {
     Some(parts.join(" "))
 }
 
-/// Primary value for the tray-icon tooltip: plan -> "80%" (primary window used %, falling back
-/// 5h -> 周 -> 月); consumption -> "CNY 48.77". `None` when no value can be derived.
+/// Primary value for the tray-icon tooltip: plan -> "剩 20%" (primary window *remaining* %,
+/// falling back 5h -> 周 -> 月; `100 - used`, floored at 0); consumption -> "CNY 48.77"
+/// (remaining balance). `None` when no value can be derived.
+///
+/// Shows *remaining* (not used) so the hover matches the Dashboard chip (`剩 X%`) and the
+/// function's own stated intent ("the balance of the plan"). Both branches now surface what's
+/// left, not what's spent.
 fn tooltip_value(u: &UsageSnapshot) -> Option<String> {
     if u.billing_model == "consumption" {
         u.remaining.map(|r| format!("{} {:.2}", u.unit, r))
     } else {
-        let (pct, _) = primary_used(&u.tiers)?;
-        Some(format!("{}%", pct.round() as u32))
+        let (used, _) = primary_used(&u.tiers)?;
+        let remaining = (100.0 - used).max(0.0).round() as u32;
+        Some(format!("剩 {}%", remaining))
     }
 }
 
-/// Tray-icon tooltip text: the balance of the plan the last request actually used (the
-/// "currently effective" plan), one line e.g. "火山 · coding plan 21%". Showing only the active
-/// plan keeps the tooltip well under the Windows 64-char tray-tooltip limit (listing every plan
-/// overflows it and gets mid-value-truncated by the OS). `None` (no request served yet), an
+/// Tray-icon tooltip text: the *remaining* balance of the plan the last request actually used
+/// (the "currently effective" plan), one line e.g. "火山 · coding plan 剩 79%". Showing only the
+/// active plan keeps the tooltip well under the Windows 64-char tray-tooltip limit (listing every
+/// plan overflows it and gets mid-value-truncated by the OS). `None` (no request served yet), an
 /// unknown provider id, or a plan whose usage has no concrete value -> app name ("SwitchLM").
 fn last_served_tooltip(
     cfg: &AppConfig,
@@ -583,10 +589,10 @@ mod tests {
 
     #[test]
     fn spec_tooltip_shows_last_served_provider_balance() {
-        // Tooltip shows ONLY the plan the last request used (one line), not every plan.
+        // Tooltip shows ONLY the plan the last request used (one line), as *remaining*.
         let (cfg, usage) = tooltip_cfg_usage();
         let plan = tray_menu_spec(&cfg, &usage, Some("zhipu"));
-        assert_eq!(plan.tooltip, "智谱 80%");
+        assert_eq!(plan.tooltip, "智谱 剩 20%");
         let consumption = tray_menu_spec(&cfg, &usage, Some("deepseek"));
         assert_eq!(consumption.tooltip, "DS CNY 48.77");
     }
@@ -662,10 +668,10 @@ mod tests {
 
     #[test]
     fn tooltip_value_uses_five_hour_then_falls_back_weekly() {
-        // 5h 有 -> 5h 为主值。
-        assert_eq!(tooltip_value(&snap_tiers(Some(80.0), None, None)).as_deref(), Some("80%"));
+        // 5h 有 -> 5h 为主值（显示剩余 = 100 − 已用）。
+        assert_eq!(tooltip_value(&snap_tiers(Some(80.0), None, None)).as_deref(), Some("剩 20%"));
         // 5h 缺、周档有 -> 周档为主值（千问 regression：此前因 used=None 被 tooltip 丢弃）。
-        assert_eq!(tooltip_value(&snap_tiers(None, Some(40.0), None)).as_deref(), Some("40%"));
+        assert_eq!(tooltip_value(&snap_tiers(None, Some(40.0), None)).as_deref(), Some("剩 60%"));
         // 所有窗口都无值 -> None（账号从 tooltip 隐藏）。
         assert_eq!(tooltip_value(&snap_tiers(None, None, None)).as_deref(), None);
     }
