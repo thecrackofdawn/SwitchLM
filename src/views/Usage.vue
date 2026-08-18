@@ -223,8 +223,16 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
 <template>
   <NSpace vertical :size="12">
     <NSpace justify="space-between" align="center">
-      <span class="muted">套餐用量（每 {{ refreshSecs }}s 自动刷新）</span>
-      <NButton size="small" :loading="runtime.loading" @click="refresh">刷新</NButton>
+      <span class="muted">套餐用量</span>
+      <NTooltip>
+        <template #trigger>
+          <NSpace align="center" :size="6" :wrap="false">
+            <span class="auto-refresh-hint" title="">每 {{ refreshSecs }}s 自动刷新</span>
+            <NButton size="small" :loading="runtime.loading" @click="refresh">刷新</NButton>
+          </NSpace>
+        </template>
+        <div>用量数据与统计数据每 {{ refreshSecs }} 秒自动刷新一次</div>
+      </NTooltip>
     </NSpace>
 
     <draggable v-model="ordered" item-key="provider_id" class="drag-list" handle=".drag-handle" :animation="150" @start="dragging = true" @end="onDragEnd">
@@ -378,6 +386,11 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
 .muted {
   color: var(--sl-text-2);
   font-size: 13px;
+}
+.auto-refresh-hint {
+  color: var(--sl-text-3);
+  font-size: 12px;
+  white-space: nowrap;
 }
 .raw {
   font-size: 12px;
