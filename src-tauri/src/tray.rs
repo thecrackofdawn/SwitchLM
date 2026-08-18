@@ -290,23 +290,38 @@ fn toggle_action(visible: Option<bool>, minimized: Option<bool>) -> ToggleAction
 }
 
 /// Toggle the main window (used by the tray-icon left-click): hide it when it is shown on screen
-/// (visible and not minimized); otherwise summon it — unminimize if minimized, show and focus.
+/// (visible and not minimized); otherwise summon it. Summoning cancels any in-flight idle-destroy
+/// timer and rebuilds the window if it was previously destroyed for memory saving.
 /// Decides via `toggle_action` (visibility/minimized) rather than `is_focused()`, because the tray
 /// click itself steals focus (see `toggle_action`). Query errors default to Summon: never hide.
 fn toggle_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        return;
+    // 先尝试读取已有窗口的状态决定 hide 还是 summon；窗口已销毁则直接 summon（会重建）。
+    let action = match app.get_webview_window("main") {
+        Some(window) => {
+            let visible = window.is_visible().ok();
+            let minimized = window.is_minimized().ok();
+            toggle_action(visible, minimized)
+        }
+        None => ToggleAction::Summon, // webview 已被后台销毁 -> 重建。
     };
-    let visible = window.is_visible().ok();
-    let minimized = window.is_minimized().ok();
-    match toggle_action(visible, minimized) {
+    match action {
         ToggleAction::Hide => {
-            let _ = window.hide();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+            // 隐藏到托盘后起销毁计时（若开关开启，5 分钟后释放 webview）。
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::idle_destroy::arm_idle_destroy(&app).await;
+            });
         }
         ToggleAction::Summon => {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            // 该回调在主线程同步执行：spawn 到异步运行时执行 async summon_main_window
+            // （与 on_menu_event 的退出处理同模式）。summon 会先取消在途销毁计时。
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::idle_destroy::summon_main_window(&app).await;
+            });
         }
     }
 }

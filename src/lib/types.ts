@@ -78,6 +78,7 @@ export interface Settings {
   usage_refresh_interval_secs: number;
   log_level: string;
   request_recording: boolean;
+  background_destroy: boolean;
 }
 
 export interface PlanInfo {
@@ -147,6 +148,7 @@ export interface SettingsView {
   usage_refresh_interval_secs: number;
   log_level: string;
   request_recording: boolean;
+  background_destroy: boolean;
 }
 
 // Mirrors src-tauri `SecretStatusView`.

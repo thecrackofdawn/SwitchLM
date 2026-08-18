@@ -57,6 +57,10 @@ pub struct Settings {
     /// 是否记录每个请求的完整入站请求体 + 哈希到本地(默认关)。见 spec §8。
     #[serde(default)]
     pub request_recording: bool,
+    /// 后台隐藏到托盘 5 分钟后是否销毁 webview 以释放内存（默认开）。代理与托盘不受影响。
+    /// 见 docs/superpowers/specs/2026-08-14-background-webview-destroy-design.md。
+    #[serde(default = "default_background_destroy")]
+    pub background_destroy: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -67,6 +71,7 @@ impl Default for Settings {
             log_level: DEFAULT_LOG_LEVEL.into(),
             secret_store_fallback: None,
             request_recording: false,
+            background_destroy: true,
         }
     }
 }
@@ -78,6 +83,9 @@ fn default_usage_refresh_interval_secs() -> u32 {
 }
 fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.into()
+}
+fn default_background_destroy() -> bool {
+    true
 }
 
 /// Clamp a usage-refresh interval (seconds) into the allowed [30, 3600] range.
@@ -320,7 +328,7 @@ mod tests {
             }],
             usage_order: vec![],
             route_order: vec![],
-            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false },
+            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false, background_destroy: true },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -529,5 +537,17 @@ mod tests {
         let back: Model = serde_json::from_str(&json).unwrap();
         assert_eq!(back.retry_count, 2);
         assert_eq!(back.retry_delay_secs, 5);
+    }
+
+    #[test]
+    fn background_destroy_defaults_on() {
+        // Opt-out: a fresh Settings (and a config file that omits the field) must default to true.
+        assert_eq!(Settings::default().background_destroy, true);
+
+        // A config JSON that predates this feature (no background_destroy key) must deserialize
+        // to true via #[serde(default)].
+        let json = r#"{"port":6950,"autostart":false,"usage_refresh_interval_secs":60,"log_level":"info","request_recording":false}"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.background_destroy, true);
     }
 }

@@ -858,7 +858,8 @@ pub async fn toggle_autostart_core(
     Ok(enabled)
 }
 
-/// Read-only view of app settings (port + autostart + usage refresh interval + log level).
+/// Read-only view of app settings (port + autostart + usage refresh interval + log level
+/// + request recording + background webview destroy).
 #[derive(Serialize)]
 pub struct SettingsView {
     pub port: u16,
@@ -866,6 +867,7 @@ pub struct SettingsView {
     pub usage_refresh_interval_secs: u32,
     pub log_level: String,
     pub request_recording: bool,
+    pub background_destroy: bool,
 }
 
 #[tauri::command]
@@ -877,6 +879,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsView, St
         usage_refresh_interval_secs: clamp_usage_refresh_secs(cfg.settings.usage_refresh_interval_secs),
         log_level: normalize_log_level(&cfg.settings.log_level),
         request_recording: cfg.settings.request_recording,
+        background_destroy: cfg.settings.background_destroy,
     })
 }
 
@@ -1053,6 +1056,30 @@ pub async fn set_request_recording(
         None // drop old Arc → channel closes → old writer task exits
     };
     *state.recorder.write().unwrap() = next;
+    Ok(())
+}
+
+/// 开关后台 webview 销毁：持久化设置 + 立即生效（开启且当前隐藏则起计时；关闭则取消在途计时）。
+/// 见 docs/superpowers/specs/2026-08-14-background-webview-destroy-design.md。
+#[tauri::command]
+pub async fn set_background_destroy(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut config = state.config.write().await;
+        config.settings.background_destroy = enabled;
+        persist(&app, &config)?;
+    }
+    if enabled {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::idle_destroy::arm_idle_destroy(&app).await;
+        });
+    } else {
+        crate::idle_destroy::cancel_idle_destroy(&app);
+    }
     Ok(())
 }
 

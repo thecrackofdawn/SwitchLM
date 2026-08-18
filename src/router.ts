@@ -45,3 +45,26 @@ export const router = createRouter({
   history: createWebHashHistory(),
   routes,
 });
+
+const LAST_ROUTE_KEY = "switchlm:lastRoute";
+
+// 记录最后访问的路由：webview 被后台销毁后重建时，SPA 重新加载，据此回到用户离开的页面。
+router.afterEach((to) => {
+  try {
+    localStorage.setItem(LAST_ROUTE_KEY, to.path);
+  } catch {
+    // localStorage 不可用时静默放弃（不影响核心功能）。
+  }
+});
+
+// 启动时恢复上次路由（仅当存在且能解析到真实路由，否则保持默认 /dashboard）。
+export function restoreLastRoute() {
+  try {
+    const last = localStorage.getItem(LAST_ROUTE_KEY);
+    if (last && router.resolve(last).matched.length > 0) {
+      router.replace(last).catch(() => { /* 忽略懒加载分片失败：恢复失败则保持默认 /dashboard */ });
+    }
+  } catch {
+    // 忽略：默认停在 /dashboard。
+  }
+}

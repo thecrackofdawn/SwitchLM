@@ -1,6 +1,6 @@
 [package]
 name = "switchlm"
-version = "0.1.0"
+version = "0.1.1"
 description = "SwitchLM — local LLM proxy for coding agents"
 authors = ["SwitchLM"]
 edition = "2021"

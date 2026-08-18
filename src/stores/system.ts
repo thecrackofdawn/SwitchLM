@@ -72,6 +72,11 @@ export const useSystemStore = defineStore("system", () => {
     await loadSettings();
   }
 
+  async function saveBackgroundDestroy(enabled: boolean) {
+    await api.setBackgroundDestroy(enabled);
+    await loadSettings();
+  }
+
   async function clearRequestLog() {
     await api.clearRequestLog();
   }
@@ -110,6 +115,7 @@ export const useSystemStore = defineStore("system", () => {
     saveUsageRefreshInterval,
     saveLogLevel,
     saveRequestRecording,
+    saveBackgroundDestroy,
     clearRequestLog,
     openLogDir,
     restart,

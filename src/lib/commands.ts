@@ -135,6 +135,8 @@ export const setLogLevel = (level: string) => invoke<void>("set_log_level", { le
 export const openLogDir = () => invoke<void>("open_log_dir");
 export const setRequestRecording = (enabled: boolean) =>
   invoke<void>("set_request_recording", { enabled });
+export const setBackgroundDestroy = (enabled: boolean) =>
+  invoke<void>("set_background_destroy", { enabled });
 export const clearRequestLog = () => invoke<void>("clear_request_log");
 
 // ---- secret store / consent (Linux fallback) ----

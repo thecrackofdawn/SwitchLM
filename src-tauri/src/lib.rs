@@ -1,6 +1,7 @@
 pub mod qianwen_login;
 pub mod commands;
 pub mod config;
+mod idle_destroy;
 pub mod proxy;
 pub mod recording;
 pub mod translate;
@@ -83,10 +84,10 @@ pub fn run() {
     // trip `unused_mut` in dev, since the reassignment is cfg'd out.)
     #[cfg(all(desktop, not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::idle_destroy::summon_main_window(&app).await;
+        });
     }));
 
     builder
@@ -106,10 +107,13 @@ pub fn run() {
             // 其余启动（手动打开、`tauri dev`）显式 show——tauri.conf.json 已将 visible 置为
             // false 以免开机时先闪一下窗口再隐藏。放在 setup 最前（fallible 配置/密钥环之前），
             // 这样即使后续步骤失败，手动启动也已 show 过窗口，不会卡在隐藏状态。
-            if is_autostart_launch(std::env::args()) {
+            let is_autostart = is_autostart_launch(std::env::args());
+            if is_autostart {
                 tracing::info!("开机自启启动，主窗口保持隐藏（托盘/代理正常运行）");
             } else if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
+                // 手动启动窗口可见：取消任何（理论上不会有）在途计时。
+                crate::idle_destroy::cancel_idle_destroy(app.handle());
             }
             // 探测系统密钥环 → 选后端（keyring 可用→KeyringStore；不可用且已授权→FileSecretStore；
             // 否则→PendingStore，前端弹授权框，授权后 swap 到 FileSecretStore）。
@@ -173,7 +177,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 start_proxy_with_retry(state_for_server, preferred).await;
             });
+            app.manage(crate::idle_destroy::IdleDestroyHandle::default());
             app.manage(state);
+            // 自启以隐藏态启动：armed 销毁计时（5 分钟后若无唤起则释放 webview）。
+            // IdleDestroyHandle 与 AppState 均已 manage，spawn 的任务可安全读取状态。
+            if is_autostart {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::idle_destroy::arm_idle_destroy(&app_handle).await;
+                });
+            }
             app.manage(log_handle);
 
             // System tray: per-Profile backing switch + inline quota % + cooling markers.
@@ -197,6 +210,11 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                    // 隐藏到托盘后起销毁计时（若开关开启，5 分钟后释放 webview）。
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::idle_destroy::arm_idle_destroy(&app).await;
+                    });
                 }
             }
         })
@@ -254,10 +272,21 @@ pub fn run() {
             commands::set_log_level,
             commands::open_log_dir,
             commands::set_request_recording,
+            commands::set_background_destroy,
             commands::clear_request_log,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running SwitchLM");
+        .build(tauri::generate_context!())
+        .expect("error while building SwitchLM")
+        .run(|_handle, event| {
+            // 销毁最后一个窗口（含后台 webview 销毁）会触发 ExitRequested 且 code == None。
+            // 此时必须 prevent_exit，否则代理 + 托盘会随 webview 一起退出。
+            // 真正的退出（托盘 退出 / quit_app IPC）走 app.exit(0)，code == Some，放行。
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

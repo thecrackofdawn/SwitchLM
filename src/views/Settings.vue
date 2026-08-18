@@ -103,6 +103,14 @@ async function toggleRecording(on: boolean) {
     msg.error(`设置失败：${String(e)}`);
   }
 }
+async function toggleBackgroundDestroy(on: boolean) {
+  try {
+    await system.saveBackgroundDestroy(on);
+    msg.success(on ? "已开启后台内存优化" : "已关闭后台内存优化");
+  } catch (e) {
+    msg.error(`设置失败：${String(e)}`);
+  }
+}
 async function clearRequests() {
   dialog.warning({
     title: "清空请求记录",
@@ -201,6 +209,16 @@ onMounted(async () => {
           <NButton :disabled="!system.settings?.request_recording" @click="clearRequests">清空记录</NButton>
           <span class="muted">仅本地存储、不上传；默认关闭。开启后可在 app_data/request_log/ 查看 requests.jsonl</span>
         </NSpace>
+      </NSpace>
+    </NCard>
+
+    <NCard title="后台内存优化" size="small">
+      <NSpace align="center" :size="12">
+        <NSwitch
+          :value="system.settings?.background_destroy ?? true"
+          @update:value="(v: boolean) => toggleBackgroundDestroy(v)"
+        />
+        <span class="muted">窗口隐藏到托盘 5 分钟后自动释放界面进程以节省内存，代理与托盘不受影响</span>
       </NSpace>
     </NCard>
 
