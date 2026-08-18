@@ -13,6 +13,10 @@ use crate::proxy::strategies::profile_start_model;
 pub const ENV_KEY: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
 pub const ONE_M: u32 = 1_000_000;
 
+/// OpenCode limit.output 的保守回退值：catalog 未收录该模型的 output_size、而 limit
+/// 又必须声明 output（OpenCode 配置校验要求）时使用。
+pub const OC_FALLBACK_OUTPUT: u32 = 8192;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryLocation { Model, Env(&'static str) }
 
@@ -176,15 +180,22 @@ pub fn collect_entries(json: &serde_json::Value) -> ClaudeEntries {
     ClaudeEntries { entries: out }
 }
 
+/// A resolved route's catalog limits.
+struct RouteLimits {
+    context: u32,
+    /// catalog 未知 output 时为 None（OpenCode 轮退到保守默认/保留用户手写值）。
+    output: Option<u32>,
+}
+
 /// Resolve one base model name (already `[1m]`-stripped) to its primary route model's
-/// real context size. Err(carries vendor+upstream) when the route resolves but the
-/// catalog lacks a size; Ok(None) when the name matches no profile (or dangling refs).
-fn resolve_size(
+/// real catalog limits. Err(carries vendor+upstream) when the route resolves but the
+/// catalog lacks a context size; Ok(None) when the name matches no profile (or dangling refs).
+fn resolve_limits(
     cfg: &AppConfig,
     catalog: &ProviderCatalog,
     base: &str,
     now: &LocalNow,
-) -> Result<Option<u32>, (String, String)> {
+) -> Result<Option<RouteLimits>, (String, String)> {
     let Some(prof) = cfg.profiles.iter().find(|p| {
         p.name == base || p.aliases.iter().any(|a| a == base)
     }) else {
@@ -201,7 +212,10 @@ fn resolve_size(
         .map(|p| p.vendor.clone())
         .unwrap_or_default();
     match catalog.context_size(&vendor, &model.upstream_model_id) {
-        Some(s) => Ok(Some(s)),
+        Some(context) => Ok(Some(RouteLimits {
+            context,
+            output: catalog.output_size(&vendor, &model.upstream_model_id),
+        })),
         // Err 带上 vendor+upstream（日志惯例：可脱离本机配置识别厂商与模型）。
         None => Err((vendor, model.upstream_model_id.clone())),
     }
@@ -219,8 +233,8 @@ pub fn compute_plan(
 
     for (loc, raw) in &entries.entries {
         let base = strip_1m(raw).to_string();
-        let size = match resolve_size(cfg, catalog, &base, now) {
-            Ok(Some(s)) => s,
+        let size = match resolve_limits(cfg, catalog, &base, now) {
+            Ok(Some(l)) => l.context,
             Ok(None) => {
                 plan.notes.push(format!("skip '{raw}'（未匹配任何路由）"));
                 continue;
@@ -675,8 +689,8 @@ pub async fn sync_opencode_round(
         }
     };
 
-    // 计划：对每个 SwitchLM provider 的每个模型条目求目标 limit.context。
-    struct EntryEdit { provider: String, model: String, size: u32 }
+    // 计划：对每个 SwitchLM provider 的每个模型条目求目标 limit.context / limit.output。
+    struct EntryEdit { provider: String, model: String, size: u32, output: Option<u32> }
     let mut edits: Vec<EntryEdit> = vec![];
     let mut notes: Vec<String> = vec![];
     for pid in &targets {
@@ -688,8 +702,10 @@ pub async fn sync_opencode_round(
             continue; // models 非对象/缺失 → 该 provider 静默跳过（正常形态）
         };
         for key in models.keys() {
-            match resolve_size(&cfg, &catalog, key, &now) {
-                Ok(Some(size)) => edits.push(EntryEdit { provider: pid.clone(), model: key.clone(), size }),
+            match resolve_limits(&cfg, &catalog, key, &now) {
+                Ok(Some(l)) => edits.push(EntryEdit {
+                    provider: pid.clone(), model: key.clone(), size: l.context, output: l.output,
+                }),
                 Ok(None) => notes.push(format!("skip '{key}'（未匹配任何路由）")),
                 Err((vendor, upstream)) => notes.push(format!(
                     "skip '{key}'（{vendor}/{upstream} 上下文大小未知）"
@@ -698,7 +714,7 @@ pub async fn sync_opencode_round(
         }
     }
 
-    // 应用（只改 limit.context，缺失则创建 limit 对象；不动 output/input）。
+    // 应用（改写 limit.context 并保证 limit.output 同时声明；不动现有的 input）。
     let mut changed = false;
     for e in &edits {
         let limit = json
@@ -712,9 +728,22 @@ pub async fn sync_opencode_round(
                     l.insert("context".into(), serde_json::Value::from(e.size));
                     changed = true;
                 }
+                // OpenCode 配置校验要求 limit 必须同时声明 output。catalog 已知时写
+                // catalog 值；未知时只补缺（回退 OC_FALLBACK_OUTPUT），不覆盖用户手写值。
+                let cur_output = l.get("output").and_then(|o| o.as_u64());
+                let want_output = match e.output {
+                    Some(w) => Some(w as u64),
+                    None if cur_output.is_none() => Some(OC_FALLBACK_OUTPUT as u64),
+                    None => None, // catalog 未知且用户已手写 -> 保留
+                };
+                if want_output.is_some() && cur_output != want_output {
+                    l.insert("output".into(), serde_json::Value::from(want_output.unwrap()));
+                    changed = true;
+                }
             }
             _ => {
                 // limit 缺失（或非对象——非对象不动，视为用户手写异形）：
+                // OpenCode 配置验证要求 limit 必须包含 output 字段
                 if let Some(m) = json
                     .get_mut("provider").and_then(|p| p.get_mut(&e.provider))
                     .and_then(|p| p.get_mut("models"))
@@ -722,7 +751,11 @@ pub async fn sync_opencode_round(
                     .and_then(|m| m.as_object_mut())
                 {
                     if !m.contains_key("limit") {
-                        m.insert("limit".into(), serde_json::json!({ "context": e.size }));
+                        // 创建包含 context 和 output 的 limit 对象；output 未知时回退保守默认值
+                        m.insert("limit".into(), serde_json::json!({
+                            "context": e.size,
+                            "output": e.output.unwrap_or(OC_FALLBACK_OUTPUT)
+                        }));
                         changed = true;
                     }
                 }
@@ -773,7 +806,7 @@ pub async fn sync_opencode_round(
             tracing::info!(target: "switchlm::sync", path = %path.display(), "已同步 OpenCode 上下文声明");
             status.record_opencode_round(LastRound {
                 at: now_rfc3339(), action: "written".into(),
-                detail: notes_detail(&format!("写入 {} 项 limit.context", edits.len())),
+                detail: notes_detail(&format!("写入 {} 项 limit.context/output", edits.len())),
             });
         }
         Err(e) => {
@@ -976,8 +1009,8 @@ mod tests {
 
     fn plan_catalog() -> ProviderCatalog {
         serde_json::from_str(r#"{"version":1,"providers":[
-            {"provider_id":"zhipu","models":[{"upstream_model_id":"glm-4.6","context_size":200000}]},
-            {"provider_id":"volcengine-coding","models":[{"upstream_model_id":"glm-5.2","context_size":1000000}]}
+            {"provider_id":"zhipu","models":[{"upstream_model_id":"glm-4.6","context_size":200000,"output_size":128000}]},
+            {"provider_id":"volcengine-coding","models":[{"upstream_model_id":"glm-5.2","context_size":1000000,"output_size":131072}]}
         ]}"#).unwrap()
     }
 
@@ -1480,8 +1513,11 @@ mod tests {
 
         let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["context"], 200_000);
+        // 已存在的 limit 对象：output 一并写入（OpenCode 校验要求 limit 同时声明 output）
+        assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["output"], 128_000);
         assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["options"]["reasoningEffort"], "high", "sibling options kept");
         assert_eq!(j["provider"]["switchlm"]["models"]["flash"]["limit"]["context"], 1_000_000);
+        assert_eq!(j["provider"]["switchlm"]["models"]["flash"]["limit"]["output"], 131_072);
         assert!(j["provider"]["switchlm"]["models"]["weird"].as_object().unwrap().is_empty(), "unmatched entry untouched (no limit created)");
         assert_eq!(j["provider"]["direct"]["models"]["deepseek-v4-pro"].as_object().unwrap().len(), 0, "foreign provider untouched");
         let r = status.snapshot_opencode().unwrap();
@@ -1513,8 +1549,43 @@ mod tests {
         let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["context"], 200_000);
         assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["options"]["textVerbosity"], "low");
-        // output/input NOT invented
-        assert!(j["provider"]["switchlm"]["models"]["pro"]["limit"].get("output").is_none());
+        // output 字段必须存在以满足 OpenCode 配置验证（catalog 已知 -> 写 catalog 值）
+        assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["output"], 128_000);
+        // input 字段不创建
+        assert!(j["provider"]["switchlm"]["models"]["pro"]["limit"].get("input").is_none());
+    }
+
+    #[tokio::test]
+    async fn oc_round_unknown_output_keeps_user_value_fills_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = opencode_config_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // "kept"：用户手写 output；"filled"：缺 output -- catalog 未知时才分别保留/回退
+        std::fs::write(&path, json!({
+            "provider": { "switchlm": {
+                "options": { "baseURL": "http://127.0.0.1:6950/v1" },
+                "models": {
+                    "pro":   { "limit": { "context": 1, "output": 55555 } },
+                    "flash": { "limit": { "context": 1 } }
+                }
+            }}
+        }).to_string()).unwrap();
+        let state = test_state(round_cfg()).await;
+        // 换成不含 output_size 的 catalog（模拟自定义模型未收录 output）
+        *state.catalog.write().await = serde_json::from_str(r#"{"version":1,"providers":[
+            {"provider_id":"zhipu","models":[{"upstream_model_id":"glm-4.6","context_size":200000}]},
+            {"provider_id":"volcengine-coding","models":[{"upstream_model_id":"glm-5.2","context_size":1000000}]}
+        ]}"#).unwrap();
+        with_port(&state, Some(6950));
+        let status = SyncBookkeeping::default();
+        sync_opencode_round(&state, &status, &path).await;
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // context 仍被改写
+        assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["context"], 200_000);
+        assert_eq!(j["provider"]["switchlm"]["models"]["flash"]["limit"]["context"], 1_000_000);
+        // catalog 未知 output：用户手写值保留，缺失的补保守回退
+        assert_eq!(j["provider"]["switchlm"]["models"]["pro"]["limit"]["output"], 55_555);
+        assert_eq!(j["provider"]["switchlm"]["models"]["flash"]["limit"]["output"], 8_192);
     }
 
     #[tokio::test]

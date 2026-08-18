@@ -33,27 +33,37 @@ pub struct ProviderDesc {
 pub struct ModelDesc {
     pub upstream_model_id: String,
     pub context_size: u32,
+    /// 模型输出上限（如 OpenCode limit.output）。bundled catalog 全量携带；用户自定义条目
+    /// 可缺省（None = 未自定义，overlay 时不覆盖 baseline 值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_size: Option<u32>,
 }
 
 impl ProviderCatalog {
-    /// Catalog-only lookup (ignores any per-Model manual override). None if not bundled.
-    /// `vendor` is the provider's vendor slug (the catalog keys groups by `provider_id == vendor`).
-    pub fn context_size(&self, vendor: &str, upstream_model_id: &str) -> Option<u32> {
+    fn find_model(&self, vendor: &str, upstream_model_id: &str) -> Option<&ModelDesc> {
         self.providers
             .iter()
             .find(|p| p.provider_id == vendor)
-            .and_then(|p| {
-                p.models
-                    .iter()
-                    .find(|m| m.upstream_model_id == upstream_model_id)
-                    .map(|m| m.context_size)
-            })
+            .and_then(|p| p.models.iter().find(|m| m.upstream_model_id == upstream_model_id))
+    }
+
+    /// Catalog-only lookup (ignores any per-Model manual override). None if not bundled.
+    /// `vendor` is the provider's vendor slug (the catalog keys groups by `provider_id == vendor`).
+    pub fn context_size(&self, vendor: &str, upstream_model_id: &str) -> Option<u32> {
+        self.find_model(vendor, upstream_model_id).map(|m| m.context_size)
+    }
+
+    /// Output-size lookup (same keying as `context_size`). None when unknown/not bundled.
+    pub fn output_size(&self, vendor: &str, upstream_model_id: &str) -> Option<u32> {
+        self.find_model(vendor, upstream_model_id).and_then(|m| m.output_size)
     }
 
     /// Overlay user customizations onto the embedded baseline. For each (provider, model) in
     /// `custom`: override the context_size if the entry already exists in the baseline, otherwise
-    /// add it. A provider present only in `custom` (a user-supplemented vendor) is added wholesale.
-    /// Baseline entries not mentioned in `custom` are left untouched. `version` is passthrough.
+    /// add it. `output_size` is only overridden when the custom entry carries one (a sparse
+    /// custom entry without it keeps the baseline value). A provider present only in `custom`
+    /// (a user-supplemented vendor) is added wholesale. Baseline entries not mentioned in
+    /// `custom` are left untouched. `version` is passthrough.
     pub fn overlay_custom(&mut self, custom: &ProviderCatalog) {
         for cp in &custom.providers {
             match self.providers.iter().position(|p| p.provider_id == cp.provider_id) {
@@ -66,6 +76,9 @@ impl ProviderCatalog {
                             .find(|m| m.upstream_model_id == cm.upstream_model_id)
                         {
                             existing.context_size = cm.context_size;
+                            if cm.output_size.is_some() {
+                                existing.output_size = cm.output_size;
+                            }
                         } else {
                             group.models.push(cm.clone());
                         }
@@ -95,6 +108,7 @@ impl ProviderCatalog {
                         g.models.push(ModelDesc {
                             upstream_model_id: upstream_model_id.into(),
                             context_size: n,
+                            output_size: None,
                         });
                     }
                 }
@@ -104,6 +118,7 @@ impl ProviderCatalog {
                     models: vec![ModelDesc {
                         upstream_model_id: upstream_model_id.into(),
                         context_size: n,
+                        output_size: None,
                     }],
                 }),
             },
@@ -200,6 +215,8 @@ mod tests {
             assert!(!p.models.is_empty(), "provider {} has no models", p.provider_id);
             for m in &p.models {
                 assert!(m.context_size > 0, "{:?}/{:?} has zero size", p.provider_id, m.upstream_model_id);
+                // 每个 bundled 模型都必须声明 output_size（OpenCode limit.output 依赖它）。
+                assert!(m.output_size.unwrap_or(0) > 0, "{:?}/{:?} missing output_size", p.provider_id, m.upstream_model_id);
             }
         }
         // Verify that known providers have individual usage URLs
@@ -226,10 +243,14 @@ mod tests {
         assert_eq!(cat.context_size("qianwen-token", "qwen3.8-max-preview"), Some(1000000));
         assert_eq!(cat.context_size("qianwen-token", "qwen3.7-max"), Some(1000000));
         assert_eq!(cat.context_size("qianwen-token", "qwen3.7-plus"), Some(1000000));
-        assert_eq!(cat.context_size("qianwen-token", "qwen3.6-flash"), Some(128000));
-        assert_eq!(cat.context_size("qianwen-token", "deepseek-v4-pro"), Some(1048576));
-        assert_eq!(cat.context_size("qianwen-token", "deepseek-v4-flash-0731"), Some(1048576));
+        assert_eq!(cat.context_size("qianwen-token", "qwen3.6-flash"), Some(1000000));
+        assert_eq!(cat.context_size("qianwen-token", "deepseek-v4-pro"), Some(1000000));
+        assert_eq!(cat.context_size("qianwen-token", "deepseek-v4-flash-0731"), Some(1000000));
         assert_eq!(cat.context_size("qianwen-token", "glm-5.2"), Some(1000000));
+        // output_size lookup on a few bundled entries
+        assert_eq!(cat.output_size("zhipu", "glm-4.6"), Some(128000));
+        assert_eq!(cat.output_size("deepseek", "deepseek-chat"), Some(384000));
+        assert_eq!(cat.output_size("qianwen-token", "glm-5"), Some(16384));
     }
 
     #[test]
@@ -237,6 +258,8 @@ mod tests {
         let cat: ProviderCatalog = serde_json::from_str(EMBEDDED_CATALOG).unwrap();
         assert_eq!(cat.context_size("zhipu", "nope"), None);
         assert_eq!(cat.context_size("unknown-vendor", "glm-4.6"), None);
+        assert_eq!(cat.output_size("zhipu", "nope"), None);
+        assert_eq!(cat.output_size("unknown-vendor", "glm-4.6"), None);
     }
 
     #[test]
@@ -247,8 +270,8 @@ mod tests {
                 provider_id: "zhipu".into(),
                 individual_usage_url: None,
                 models: vec![
-                    ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000 },
-                    ModelDesc { upstream_model_id: "glm-5.2".into(), context_size: 1000000 },
+                    ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000, output_size: Some(128000) },
+                    ModelDesc { upstream_model_id: "glm-5.2".into(), context_size: 1000000, output_size: Some(131072) },
                 ],
             }],
         };
@@ -260,23 +283,27 @@ mod tests {
                     provider_id: "zhipu".into(),
                     individual_usage_url: None,
                     models: vec![
-                        ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 999 },
-                        ModelDesc { upstream_model_id: "custom-user".into(), context_size: 5000 },
+                        // sparse entry: no output_size -> baseline output kept
+                        ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 999, output_size: None },
+                        ModelDesc { upstream_model_id: "custom-user".into(), context_size: 5000, output_size: Some(4096) },
                     ],
                 },
                 // supplement an entirely new provider
                 ProviderDesc {
                     provider_id: "mycustom".into(),
                     individual_usage_url: None,
-                    models: vec![ModelDesc { upstream_model_id: "weird".into(), context_size: 7000 }],
+                    models: vec![ModelDesc { upstream_model_id: "weird".into(), context_size: 7000, output_size: None }],
                 },
             ],
         };
         base.overlay_custom(&custom);
         assert_eq!(base.context_size("zhipu", "glm-4.6"), Some(999), "custom overrides baseline");
+        assert_eq!(base.output_size("zhipu", "glm-4.6"), Some(128000), "sparse custom keeps baseline output_size");
         assert_eq!(base.context_size("zhipu", "glm-5.2"), Some(1000000), "untouched baseline kept");
         assert_eq!(base.context_size("zhipu", "custom-user"), Some(5000), "new model under existing provider");
+        assert_eq!(base.output_size("zhipu", "custom-user"), Some(4096));
         assert_eq!(base.context_size("mycustom", "weird"), Some(7000), "new provider added wholesale");
+        assert_eq!(base.output_size("mycustom", "weird"), None);
     }
 
     #[test]
@@ -286,7 +313,7 @@ mod tests {
             providers: vec![ProviderDesc {
                 provider_id: "zhipu".into(),
                 individual_usage_url: None,
-                models: vec![ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000 }],
+                models: vec![ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000, output_size: None }],
             }],
         };
         // override existing
@@ -362,6 +389,7 @@ mod tests {
                 models: vec![ModelDesc {
                     upstream_model_id: "glm-4.6".into(),
                     context_size: 333333,
+                    output_size: None,
                 }],
             }],
         };

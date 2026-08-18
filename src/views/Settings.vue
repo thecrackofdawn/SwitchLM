@@ -7,6 +7,7 @@ import {
   NSelect,
   NSpace,
   NSwitch,
+  NTag,
   useDialog,
   useMessage,
 } from "naive-ui";
@@ -115,17 +116,12 @@ async function toggleBackgroundDestroy(on: boolean) {
 async function toggleSyncClaudeContext(on: boolean) {
   try {
     await system.saveSyncClaudeContext(on);
-    msg.success(on ? "已开启编码智能体上下文同步" : "已关闭编码智能体上下文同步（已写入内容保持不变）");
+    msg.success(on ? "已开启上下文大小自动同步" : "已关闭上下文大小自动同步（已写入内容保持不变）");
   } catch (e) {
     msg.error(`设置失败：${String(e)}`);
   }
 }
 
-const SYNC_ACTION_TEXT: Record<string, string> = {
-  written: "已同步",
-  no_change: "无变化",
-  skipped: "已跳过",
-};
 async function clearRequests() {
   dialog.warning({
     title: "清空请求记录",
@@ -242,29 +238,24 @@ usePolling(() => system.loadAgentSyncStatus(), () => 60_000);
       </NSpace>
     </NCard>
 
-    <NCard title="编码智能体上下文同步" size="small">
+    <NCard title="上下文大小自动同步" size="small">
       <NSpace vertical :size="10">
         <NSpace align="center" :size="12">
           <NSwitch
             :value="system.settings?.sync_claude_context ?? false"
             @update:value="(v: boolean) => toggleSyncClaudeContext(v)"
           />
-          <span class="muted">按当前路由模型的真实上下文，自动调整 Claude Code（[1m] 声明 + CLAUDE_CODE_MAX_CONTEXT_TOKENS）与 OpenCode（limit.context）</span>
+          <span class="muted">按当前路由，自动调整编程体中模型上下文大小</span>
         </NSpace>
-        <span class="muted">
-          Claude Code：{{ system.agentSyncStatus?.claude_path ?? "…" }} · 对新会话生效
-        </span>
-        <span class="muted">
-          OpenCode：{{ system.agentSyncStatus?.opencode_path ?? "…" }} · 写回会丢失注释 · 仅同步指向本代理的 provider
-        </span>
-        <span v-if="system.agentSyncStatus?.claude_last_round" class="muted">
-          Claude Code 最近：{{ SYNC_ACTION_TEXT[system.agentSyncStatus.claude_last_round.action] ?? system.agentSyncStatus.claude_last_round.action }}
-          （{{ system.agentSyncStatus.claude_last_round.detail }}）
-        </span>
-        <span v-if="system.agentSyncStatus?.opencode_last_round" class="muted">
-          OpenCode 最近：{{ SYNC_ACTION_TEXT[system.agentSyncStatus.opencode_last_round.action] ?? system.agentSyncStatus.opencode_last_round.action }}
-          （{{ system.agentSyncStatus.opencode_last_round.detail }}）
-        </span>
+        <NSpace v-if="system.agentSyncStatus" :size="8" align="center">
+          <span class="muted">当前已识别：</span>
+          <NTag v-if="system.agentSyncStatus.claude_path" type="info" size="small" :bordered="false">
+            Claude Code
+          </NTag>
+          <NTag v-if="system.agentSyncStatus.opencode_path" type="info" size="small" :bordered="false">
+            OpenCode
+          </NTag>
+        </NSpace>
       </NSpace>
     </NCard>
 
@@ -284,5 +275,15 @@ usePolling(() => system.loadAgentSyncStatus(), () => 60_000);
 .muted {
   color: var(--sl-text-2);
   font-size: 13px;
+}
+.sync-status {
+  margin-top: 4px;
+}
+.sync-item {
+  line-height: 1.6;
+}
+.sync-label {
+  font-size: 13px;
+  font-weight: 500;
 }
 </style>
