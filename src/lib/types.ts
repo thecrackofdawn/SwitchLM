@@ -72,15 +72,6 @@ export interface ModelEffectiveFallback {
   via_fallback_strategy_id: string | null;
 }
 
-export interface Settings {
-  port: number;
-  autostart: boolean;
-  usage_refresh_interval_secs: number;
-  log_level: string;
-  request_recording: boolean;
-  background_destroy: boolean;
-}
-
 export interface PlanInfo {
   /** 首次生效时间 (ISO 8601, e.g. "2026-07-30T00:00:00+08:00"). */
   start_time?: string | null;
@@ -178,6 +169,23 @@ export interface SettingsView {
   log_level: string;
   request_recording: boolean;
   background_destroy: boolean;
+  sync_claude_context: boolean;
+}
+
+// Mirrors src-tauri `LastRound` (agent_sync.rs).
+export interface AgentSyncLastRound {
+  at: string;
+  action: "written" | "no_change" | "skipped" | string;
+  detail: string;
+}
+
+// Mirrors src-tauri `AgentSyncStatus` (commands.rs).
+export interface AgentSyncStatus {
+  enabled: boolean;
+  claude_path: string;
+  opencode_path: string;
+  claude_last_round: AgentSyncLastRound | null;
+  opencode_last_round: AgentSyncLastRound | null;
 }
 
 // Mirrors src-tauri `SecretStatusView`.

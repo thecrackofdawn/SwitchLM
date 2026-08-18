@@ -5,6 +5,7 @@ use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::agent_sync;
 use crate::config::{
     clamp_usage_refresh_secs, normalize_log_level, AppConfig, BackendKind, ContextCheckResult,
     ContextCheckStatus, FileSecretStore, MAX_USAGE_REFRESH_SECS, MIN_USAGE_REFRESH_SECS, Model,
@@ -900,7 +901,7 @@ pub async fn toggle_autostart_core(
 }
 
 /// Read-only view of app settings (port + autostart + usage refresh interval + log level
-/// + request recording + background webview destroy).
+/// + request recording + background webview destroy + Claude Code 上下文同步开关).
 #[derive(Serialize)]
 pub struct SettingsView {
     pub port: u16,
@@ -909,6 +910,7 @@ pub struct SettingsView {
     pub log_level: String,
     pub request_recording: bool,
     pub background_destroy: bool,
+    pub sync_claude_context: bool,
 }
 
 #[tauri::command]
@@ -921,6 +923,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsView, St
         log_level: normalize_log_level(&cfg.settings.log_level),
         request_recording: cfg.settings.request_recording,
         background_destroy: cfg.settings.background_destroy,
+        sync_claude_context: cfg.settings.sync_claude_context,
     })
 }
 
@@ -1138,6 +1141,57 @@ pub async fn set_background_destroy(
         crate::idle_destroy::cancel_idle_destroy(&app);
     }
     Ok(())
+}
+
+/// Claude Code / OpenCode 同步状态视图（设置页展示）：开关、两个目标文件路径、各自最近一轮结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSyncStatus {
+    pub enabled: bool,
+    pub claude_path: String,
+    pub opencode_path: String,
+    pub claude_last_round: Option<agent_sync::LastRound>,
+    pub opencode_last_round: Option<agent_sync::LastRound>,
+}
+
+/// 开关 Claude Code / OpenCode 上下文自动同步：持久化设置（默认关）。关闭时不动已写入的任何内容。
+/// 见 docs/superpowers/specs/2026-08-15-claude-context-sync-design.md。
+#[tauri::command]
+pub async fn set_sync_claude_context(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut config = state.config.write().await;
+        config.settings.sync_claude_context = enabled;
+        persist(&app, &config)?;
+    }
+    Ok(())
+}
+
+/// Claude Code / OpenCode 同步状态（设置页展示）：开关、两个目标文件路径、各自最近一轮结果。
+#[tauri::command]
+pub async fn get_agent_sync_status(
+    state: State<'_, AppState>,
+    bk: State<'_, Arc<agent_sync::SyncBookkeeping>>,
+) -> Result<AgentSyncStatus, String> {
+    let cfg = state.config.read().await;
+    let home = agent_sync::home_dir();
+    let claude_path = match &home {
+        Some(home) => agent_sync::claude_settings_path(home),
+        None => std::path::PathBuf::new(),
+    };
+    let opencode_path = match &home {
+        Some(home) => agent_sync::opencode_config_path(home),
+        None => std::path::PathBuf::new(),
+    };
+    Ok(AgentSyncStatus {
+        enabled: cfg.settings.sync_claude_context,
+        claude_path: claude_path.display().to_string(),
+        opencode_path: opencode_path.display().to_string(),
+        claude_last_round: bk.snapshot_claude(),
+        opencode_last_round: bk.snapshot_opencode(),
+    })
 }
 
 /// 清空请求记录目录。记录开启时经记录器串行清空(先关句柄再删);关闭时直接删目录。
@@ -2095,6 +2149,26 @@ mod tests {
         // disable → drops Arc → recorder None
         *state.recorder.write().unwrap() = None;
         assert!(state.recorder.read().unwrap().is_none());
+    }
+
+    // ---- settings view mapping (Claude Code 上下文同步开关) ----
+
+    #[test]
+    fn settings_view_exposes_sync_claude_context() {
+        let mut cfg = AppConfig::default();
+        cfg.settings.sync_claude_context = true;
+        // get_settings is async + State-bound; assert the view mapping via a direct
+        // construction mirroring get_settings's body:
+        let v = SettingsView {
+            port: cfg.settings.port,
+            autostart: cfg.settings.autostart,
+            usage_refresh_interval_secs: clamp_usage_refresh_secs(cfg.settings.usage_refresh_interval_secs),
+            log_level: normalize_log_level(&cfg.settings.log_level),
+            request_recording: cfg.settings.request_recording,
+            background_destroy: cfg.settings.background_destroy,
+            sync_claude_context: cfg.settings.sync_claude_context,
+        };
+        assert!(v.sync_claude_context);
     }
 
     #[tokio::test]

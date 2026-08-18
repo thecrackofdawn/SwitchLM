@@ -110,7 +110,7 @@ mod tests {
     fn save_then_load_roundtrips() {
         let dir = tempdir().unwrap();
         let cfg = AppConfig {
-            settings: Settings { port: 7000, autostart: true, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false, background_destroy: false },
+            settings: Settings { port: 7000, autostart: true, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false, background_destroy: false, sync_claude_context: false },
             ..AppConfig::default()
         };
         save(dir.path(), &cfg).unwrap();

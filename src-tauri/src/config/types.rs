@@ -61,6 +61,11 @@ pub struct Settings {
     /// 见 docs/superpowers/specs/2026-08-14-background-webview-destroy-design.md。
     #[serde(default = "default_background_destroy")]
     pub background_destroy: bool,
+    /// 是否自动同步 Claude Code 的模型上下文声明（改写 ~/.claude/settings.json 中模型名的
+    /// [1m] 后缀与 CLAUDE_CODE_MAX_CONTEXT_TOKENS，使其跟随主路由模型的真实窗口）。
+    /// 默认关。见 docs/superpowers/specs/2026-08-15-claude-context-sync-design.md。
+    #[serde(default)]
+    pub sync_claude_context: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -72,6 +77,7 @@ impl Default for Settings {
             secret_store_fallback: None,
             request_recording: false,
             background_destroy: true,
+            sync_claude_context: false,
         }
     }
 }
@@ -328,7 +334,7 @@ mod tests {
             }],
             usage_order: vec![],
             route_order: vec![],
-            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false, background_destroy: true },
+            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false, background_destroy: true, sync_claude_context: false },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -549,5 +555,19 @@ mod tests {
         let json = r#"{"port":6950,"autostart":false,"usage_refresh_interval_secs":60,"log_level":"info","request_recording":false}"#;
         let parsed: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.background_destroy, true);
+    }
+
+    #[test]
+    fn sync_claude_context_defaults_off() {
+        assert!(!Settings::default().sync_claude_context);
+        assert!(!AppConfig::default().settings.sync_claude_context);
+    }
+
+    #[test]
+    fn sync_claude_context_missing_in_old_config_loads_false() {
+        // A pre-feature settings JSON without the field must deserialize to false.
+        let json = r#"{"port":6950,"autostart":false,"usage_refresh_interval_secs":60,"log_level":"info"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(!s.sync_claude_context);
     }
 }

@@ -2,6 +2,7 @@
 // Tauri converts camelCase JS arg keys -> snake_case Rust params.
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentSyncStatus,
   ConnectionTest,
   ContextCheckResult,
   DiscoveredModel,
@@ -140,6 +141,9 @@ export const setRequestRecording = (enabled: boolean) =>
   invoke<void>("set_request_recording", { enabled });
 export const setBackgroundDestroy = (enabled: boolean) =>
   invoke<void>("set_background_destroy", { enabled });
+export const setSyncClaudeContext = (enabled: boolean) =>
+  invoke<void>("set_sync_claude_context", { enabled });
+export const getAgentSyncStatus = () => invoke<AgentSyncStatus>("get_agent_sync_status");
 export const clearRequestLog = () => invoke<void>("clear_request_log");
 
 // ---- secret store / consent (Linux fallback) ----

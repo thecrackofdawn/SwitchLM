@@ -1,6 +1,12 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import type { EnvSnippet, SecretStatusView, ServerStatus, SettingsView } from "../lib/types";
+import type {
+  AgentSyncStatus,
+  EnvSnippet,
+  SecretStatusView,
+  ServerStatus,
+  SettingsView,
+} from "../lib/types";
 import * as api from "../lib/commands";
 
 // Proxy server status / port / env snippet / settings / restart / quit / autostart.
@@ -15,6 +21,8 @@ export const useSystemStore = defineStore("system", () => {
   // Secret-store backend status — drives the global consent modal on Linux
   // when no keyring is available (`consent_required` is true in `pending`).
   const secretStatus = ref<SecretStatusView | null>(null);
+  // Claude Code / OpenCode 上下文同步状态（开关 + 目标文件 + 最近一轮结果），设置页展示。
+  const agentSyncStatus = ref<AgentSyncStatus | null>(null);
 
   async function refresh() {
     refreshing.value = true;
@@ -77,6 +85,16 @@ export const useSystemStore = defineStore("system", () => {
     await loadSettings();
   }
 
+  async function loadAgentSyncStatus() {
+    agentSyncStatus.value = await api.getAgentSyncStatus();
+  }
+
+  async function saveSyncClaudeContext(enabled: boolean) {
+    await api.setSyncClaudeContext(enabled);
+    await loadSettings();
+    await loadAgentSyncStatus();
+  }
+
   async function clearRequestLog() {
     await api.clearRequestLog();
   }
@@ -106,6 +124,7 @@ export const useSystemStore = defineStore("system", () => {
     refreshing,
     bindError,
     secretStatus,
+    agentSyncStatus,
     refresh,
     loadSecretStatus,
     grantConsent,
@@ -116,6 +135,8 @@ export const useSystemStore = defineStore("system", () => {
     saveLogLevel,
     saveRequestRecording,
     saveBackgroundDestroy,
+    loadAgentSyncStatus,
+    saveSyncClaudeContext,
     clearRequestLog,
     openLogDir,
     restart,

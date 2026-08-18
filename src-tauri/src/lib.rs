@@ -1,5 +1,6 @@
 pub mod qianwen_login;
 pub mod commands;
+pub mod agent_sync;
 pub mod config;
 mod idle_destroy;
 pub mod proxy;
@@ -178,8 +179,13 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 start_proxy_with_retry(state_for_server, preferred).await;
             });
+            let state_for_sync = state.clone();
             app.manage(crate::idle_destroy::IdleDestroyHandle::default());
             app.manage(state);
+            // Claude Code 上下文声明自动同步（默认关）：后台 30s 轮询，开关在每轮内检查。
+            let sync_status = std::sync::Arc::new(crate::agent_sync::SyncBookkeeping::default());
+            crate::agent_sync::spawn_sync_task(state_for_sync, sync_status.clone());
+            app.manage(sync_status);
             // 自启以隐藏态启动：armed 销毁计时（5 分钟后若无唤起则释放 webview）。
             // IdleDestroyHandle 与 AppState 均已 manage，spawn 的任务可安全读取状态。
             if is_autostart {
@@ -276,6 +282,8 @@ pub fn run() {
             commands::open_log_dir,
             commands::set_request_recording,
             commands::set_background_destroy,
+            commands::set_sync_claude_context,
+            commands::get_agent_sync_status,
             commands::clear_request_log,
         ])
         .build(tauri::generate_context!())
