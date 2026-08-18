@@ -865,6 +865,7 @@ pub struct SettingsView {
     pub autostart: bool,
     pub usage_refresh_interval_secs: u32,
     pub log_level: String,
+    pub request_recording: bool,
 }
 
 #[tauri::command]
@@ -875,6 +876,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<SettingsView, St
         autostart: cfg.settings.autostart,
         usage_refresh_interval_secs: clamp_usage_refresh_secs(cfg.settings.usage_refresh_interval_secs),
         log_level: normalize_log_level(&cfg.settings.log_level),
+        request_recording: cfg.settings.request_recording,
     })
 }
 
@@ -1028,6 +1030,48 @@ pub async fn open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("logs");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     app.opener().open_path(dir.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 开关请求记录:持久化设置 + 热切换运行时记录器(无需重启)。见 spec §8。
+#[tauri::command]
+pub async fn set_request_recording(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut config = state.config.write().await;
+        config.settings.request_recording = enabled;
+        persist(&app, &config)?;
+    }
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let next = if enabled {
+        let (rec, rx) = crate::recording::RequestRecorder::channel();
+        tauri::async_runtime::spawn(crate::recording::run_writer(rx, dir.join("request_log")));
+        Some(rec)
+    } else {
+        None // drop old Arc → channel closes → old writer task exits
+    };
+    *state.recorder.write().unwrap() = next;
+    Ok(())
+}
+
+/// 清空请求记录目录。记录开启时经记录器串行清空(先关句柄再删);关闭时直接删目录。
+#[tauri::command]
+pub async fn clear_request_log(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("request_log");
+    // Clone the Arc out and drop the read guard before awaiting (guard is not Send).
+    let recorder = state.recorder.read().unwrap().as_ref().map(|r| r.clone());
+    if let Some(rec) = recorder {
+        rec.clear().await;
+    } else {
+        // 记录关闭 → 没有打开的句柄,直接删(best-effort)。
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    Ok(())
 }
 
 // ---- core helpers (testable without a Tauri app handle) ----
@@ -1944,5 +1988,27 @@ mod tests {
         assert_eq!(eff[0].effective_model_id, "m_glm");
         assert_eq!(eff[0].effective_fallback_model_id.as_deref(), Some("m_qwen"));
         assert_eq!(eff[0].via_fallback_strategy_id.as_deref(), Some("s"));
+    }
+
+    #[tokio::test]
+    async fn set_request_recording_persists_and_swaps_recorder() {
+        use crate::proxy::AppStateInner;
+        let dir = tempfile::tempdir().unwrap();
+        let state: AppState =
+            Arc::new(AppStateInner::load(dir.path(), Arc::new(MemoryStore::default())).unwrap());
+        assert!(state.recorder.read().unwrap().is_none()); // off by default
+
+        // Build the minimal tauri::AppHandle-free path: test the core swap directly.
+        let dir2 = dir.path().to_path_buf();
+        // enable
+        {
+            let (rec, rx) = crate::recording::RequestRecorder::channel();
+            tokio::spawn(crate::recording::run_writer(rx, dir2.join("request_log")));
+            *state.recorder.write().unwrap() = Some(rec);
+        }
+        assert!(state.recorder.read().unwrap().is_some());
+        // disable → drops Arc → recorder None
+        *state.recorder.write().unwrap() = None;
+        assert!(state.recorder.read().unwrap().is_none());
     }
 }

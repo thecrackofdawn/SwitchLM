@@ -9,6 +9,7 @@ use crate::config::catalog::{ensure_catalog, ProviderCatalog};
 use crate::config::store::{self, StoreError};
 use crate::config::{AppConfig, SecretStore, SecretStoreHandle, BackendKind, UsageCreds};
 use crate::proxy::health::{Clock, HealthRegistry, SystemClock};
+use crate::recording::RequestRecorder;
 use crate::usage::UsageCache;
 
 pub struct AppStateInner {
@@ -40,6 +41,9 @@ pub struct AppStateInner {
     /// every plan (which overflows the Windows 64-char tray-tooltip limit). `None` until the
     /// first request produces a response. Runtime-only, not persisted.
     pub last_served_provider: Mutex<Option<String>>,
+    /// 请求记录器(`None` = 记录关闭,零开销)。RwLock 以便 set_request_recording 热切换。
+    /// 见 spec §3/§8。
+    pub recorder: std::sync::RwLock<Option<std::sync::Arc<RequestRecorder>>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -63,6 +67,7 @@ impl AppStateInner {
             bind_error: Mutex::new(None),
             polling_handle: Mutex::new(None),
             last_served_provider: Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         })
     }
 

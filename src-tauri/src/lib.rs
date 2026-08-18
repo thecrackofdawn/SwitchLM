@@ -2,6 +2,7 @@ pub mod qianwen_login;
 pub mod commands;
 pub mod config;
 pub mod proxy;
+pub mod recording;
 pub mod translate;
 pub mod tray;
 pub mod usage;
@@ -143,6 +144,16 @@ pub fn run() {
                 crate::logging::level_filter_for(&cfg.settings.log_level),
             );
             let cfg_for_tray = cfg.clone();
+            let recorder: Option<std::sync::Arc<crate::recording::RequestRecorder>> =
+                if cfg.settings.request_recording {
+                    let (rec, rx) = crate::recording::RequestRecorder::channel();
+                    tauri::async_runtime::spawn(
+                        crate::recording::run_writer(rx, dir.join("request_log")),
+                    );
+                    Some(rec)
+                } else {
+                    None
+                };
             let state: proxy::AppState = Arc::new(AppStateInner {
                 config: tokio::sync::RwLock::new(cfg),
                 catalog: tokio::sync::RwLock::new(catalog),
@@ -155,6 +166,7 @@ pub fn run() {
                 bind_error: Mutex::new(None),
                 polling_handle: Mutex::new(None),
                 last_served_provider: Mutex::new(None),
+                recorder: std::sync::RwLock::new(recorder),
             });
 
             let state_for_server = state.clone();
@@ -241,6 +253,8 @@ pub fn run() {
             commands::set_usage_refresh_interval,
             commands::set_log_level,
             commands::open_log_dir,
+            commands::set_request_recording,
+            commands::clear_request_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SwitchLM");

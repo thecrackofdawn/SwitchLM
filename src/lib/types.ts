@@ -77,6 +77,7 @@ export interface Settings {
   autostart: boolean;
   usage_refresh_interval_secs: number;
   log_level: string;
+  request_recording: boolean;
 }
 
 export interface PlanInfo {
@@ -145,6 +146,7 @@ export interface SettingsView {
   autostart: boolean;
   usage_refresh_interval_secs: number;
   log_level: string;
+  request_recording: boolean;
 }
 
 // Mirrors src-tauri `SecretStatusView`.

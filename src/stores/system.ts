@@ -67,6 +67,15 @@ export const useSystemStore = defineStore("system", () => {
     await loadSettings();
   }
 
+  async function saveRequestRecording(enabled: boolean) {
+    await api.setRequestRecording(enabled);
+    await loadSettings();
+  }
+
+  async function clearRequestLog() {
+    await api.clearRequestLog();
+  }
+
   async function openLogDir() {
     await api.openLogDir();
   }
@@ -100,6 +109,8 @@ export const useSystemStore = defineStore("system", () => {
     savePort,
     saveUsageRefreshInterval,
     saveLogLevel,
+    saveRequestRecording,
+    clearRequestLog,
     openLogDir,
     restart,
     quit,

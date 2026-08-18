@@ -95,6 +95,30 @@ async function toggleAutostart(on: boolean) {
     msg.error(`设置失败：${String(e)}`);
   }
 }
+async function toggleRecording(on: boolean) {
+  try {
+    await system.saveRequestRecording(on);
+    msg.success(on ? "已开启请求记录" : "已关闭请求记录");
+  } catch (e) {
+    msg.error(`设置失败：${String(e)}`);
+  }
+}
+async function clearRequests() {
+  dialog.warning({
+    title: "清空请求记录",
+    content: "确认清空所有已记录的请求数据？此操作不可撤销。",
+    positiveText: "清空",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      try {
+        await system.clearRequestLog();
+        msg.success("已清空请求记录");
+      } catch (e) {
+        msg.error(`清空失败：${String(e)}`);
+      }
+    },
+  });
+}
 async function restart() {
   try {
     await system.restart();
@@ -161,6 +185,22 @@ onMounted(async () => {
         <NButton type="primary" @click="saveLevel">保存</NButton>
         <NButton @click="openLogs">打开日志文件夹</NButton>
         <span class="muted">默认 info · 向 trace 调整可见更详细日志（立即生效），用于排查问题</span>
+      </NSpace>
+    </NCard>
+
+    <NCard title="请求记录" size="small">
+      <NSpace vertical :size="10">
+        <NSpace align="center" :size="12">
+          <NSwitch
+            :value="system.settings?.request_recording ?? false"
+            @update:value="(v: boolean) => toggleRecording(v)"
+          />
+          <span class="muted">记录每个请求的完整内容(含代码与可能的密钥)到本地，用于分析缓存优化</span>
+        </NSpace>
+        <NSpace align="center" :size="12">
+          <NButton :disabled="!system.settings?.request_recording" @click="clearRequests">清空记录</NButton>
+          <span class="muted">仅本地存储、不上传；默认关闭。开启后可在 app_data/request_log/ 查看 requests.jsonl</span>
+        </NSpace>
       </NSpace>
     </NCard>
 

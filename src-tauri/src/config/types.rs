@@ -54,6 +54,9 @@ pub struct Settings {
     /// None=未授权（每次启动询问）；Some(true)=已授权（记住）。见 spec §4.2.3。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_store_fallback: Option<bool>,
+    /// 是否记录每个请求的完整入站请求体 + 哈希到本地(默认关)。见 spec §8。
+    #[serde(default)]
+    pub request_recording: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -63,6 +66,7 @@ impl Default for Settings {
             usage_refresh_interval_secs: DEFAULT_USAGE_REFRESH_SECS,
             log_level: DEFAULT_LOG_LEVEL.into(),
             secret_store_fallback: None,
+            request_recording: false,
         }
     }
 }
@@ -316,7 +320,7 @@ mod tests {
             }],
             usage_order: vec![],
             route_order: vec![],
-            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None },
+            settings: Settings { port: 6950, autostart: false, usage_refresh_interval_secs: 60, log_level: "info".into(), secret_store_fallback: None, request_recording: false },
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();

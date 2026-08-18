@@ -133,6 +133,9 @@ export const setUsageRefreshInterval = (seconds: number) =>
   invoke<void>("set_usage_refresh_interval", { seconds });
 export const setLogLevel = (level: string) => invoke<void>("set_log_level", { level });
 export const openLogDir = () => invoke<void>("open_log_dir");
+export const setRequestRecording = (enabled: boolean) =>
+  invoke<void>("set_request_recording", { enabled });
+export const clearRequestLog = () => invoke<void>("clear_request_log");
 
 // ---- secret store / consent (Linux fallback) ----
 export const getSecretStatus = () => invoke<SecretStatusView>("get_secret_status");

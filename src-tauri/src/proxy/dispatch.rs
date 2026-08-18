@@ -144,6 +144,43 @@ pub async fn dispatch(
             *state.last_served_provider.lock().unwrap() = Some(pid);
         }
     }
+    // 请求记录(spec §4):在 dispatch 末端、结果已知后落一条 JSONL。仅当记录开启时有开销。
+    {
+        let recorder = state.recorder.read().unwrap().clone(); // Option<Arc<RequestRecorder>>
+        if let Some(r) = recorder {
+            let (served_vendor, served_model) = served
+                .split_once('/')
+                .map(|(v, m)| (v.to_string(), m.to_string()))
+                .unwrap_or_else(|| ("-".to_string(), served.clone()));
+            let (outcome_str, status) = match &result {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    if resp.status().is_success() { ("ok", Some(code)) } else { ("error", Some(code)) }
+                }
+                Err(_) => ("error", None),
+            };
+            r.record(crate::recording::RequestRecord {
+                ts: chrono::Local::now().to_rfc3339(),
+                req_id,
+                protocol: edge_str(protocol),
+                requested,
+                vendor: served_vendor,
+                model: served_model,
+                stream: is_stream,
+                bytes: body.len(),
+                body: req.clone(),
+                hash_full: crate::recording::hash_full(&req),
+                hash_messages: crate::recording::hash_messages(
+                    &req,
+                    matches!(protocol, ClientProtocol::Anthropic),
+                ),
+                outcome: outcome_str,
+                status,
+                ms,
+                hops: outcome.hops,
+            });
+        }
+    }
     result
 }
 
@@ -595,6 +632,14 @@ fn path_for(p: ClientProtocol) -> &'static str {
     match p {
         ClientProtocol::OpenAI => "/v1/chat/completions",
         ClientProtocol::Anthropic => "/v1/messages",
+    }
+}
+
+/// 协议边 → 记录用的字符串标识(日志/记录元数据)。
+fn edge_str(p: ClientProtocol) -> &'static str {
+    match p {
+        ClientProtocol::OpenAI => "openai",
+        ClientProtocol::Anthropic => "anthropic",
     }
 }
 
@@ -1214,6 +1259,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         })
     }
 
@@ -1238,6 +1284,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
         let snap = snapshot_model(&state, "m_a").await.unwrap();
         assert_eq!(snap.provider_id, "prov_abc"); // opaque key preserved
@@ -1265,6 +1312,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
         assert_eq!(model_tag(&state, "m_a").await, "zhipu/m_a");
         assert_eq!(model_tag(&state, "m_missing").await, "unknown/m_missing");
@@ -1457,6 +1505,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
 
         let app = build_router(state.clone());
@@ -1524,6 +1573,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
 
         let app = build_router(state.clone());
@@ -1667,6 +1717,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
 
         let app = build_router(state.clone());
@@ -2054,6 +2105,7 @@ mod tests {
             server_handle: std::sync::Mutex::new(None), bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2147,6 +2199,7 @@ mod tests {
                 bind_error: std::sync::Mutex::new(None),
                 polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
             });
             let app = build_router(state.clone());
             let resp = app.oneshot(oai_post()).await.unwrap();
@@ -2223,6 +2276,7 @@ mod tests {
             bind_error: std::sync::Mutex::new(None),
             polling_handle: std::sync::Mutex::new(None),
             last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
         });
         let app = build_router(state.clone());
         let resp = app.oneshot(oai_post()).await.unwrap();
