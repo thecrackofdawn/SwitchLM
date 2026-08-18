@@ -676,6 +676,32 @@ pub async fn recognized_context_size(
     Ok(catalog.context_size(&vendor, &upstream_model_id))
 }
 
+/// Get the individual usage URL for a provider's vendor from the catalog. Returns None when
+/// the vendor doesn't have a configured usage URL. Resolves the provider's vendor under the
+/// config read lock, then takes the catalog read lock.
+///
+/// Used by the 套餐用量 page to add "跳转到官方用量页面" links for each provider.
+#[tauri::command]
+pub async fn get_provider_usage_url(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Option<String>, String> {
+    let vendor = {
+        let cfg = state.config.read().await;
+        cfg.providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .map(|p| p.vendor.clone())
+            .unwrap_or_default()
+    };
+    let catalog = state.catalog.read().await;
+    Ok(catalog
+        .providers
+        .iter()
+        .find(|p| p.provider_id == vendor)
+        .and_then(|p| p.individual_usage_url.clone()))
+}
+
 /// Set (or clear, when `context_size` is None) the user's custom context-size override for a
 /// (provider, upstream_model_id) pair. Writes `custom_provider_desc.json` to disk first, then
 /// re-derives the in-memory catalog (embedded baseline + custom overlay) under the write lock - so

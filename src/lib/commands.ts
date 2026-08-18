@@ -116,6 +116,7 @@ export const clearQianwenCookie = (providerId: string) =>
 export const getUsage = (providerId: string) => invoke<UsageSnapshot>("get_usage", { providerId });
 export const getAllUsage = () => invoke<UsageEntry[]>("get_all_usage");
 export const getModelHealth = () => invoke<Record<string, ModelHealth>>("get_model_health");
+export const getProviderUsageUrl = (providerId: string) => invoke<string | null>("get_provider_usage_url", { providerId });
 
 // ---- server / app ----
 export const getServerStatus = () => invoke<ServerStatus>("get_server_status");

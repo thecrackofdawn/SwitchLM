@@ -8,6 +8,8 @@ import { DEFAULT_USAGE_REFRESH_SECS, MIN_USAGE_REFRESH_SECS, type UsageEntry } f
 import draggable from "vuedraggable";
 import { usePolling } from "../lib/usePolling";
 import { vendorLabel } from "../lib/selectLabel";
+import { getProviderUsageUrl } from "../lib/commands";
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 const msg = useMessage();
 const runtime = useRuntimeStore();
@@ -31,6 +33,7 @@ interface UsageCard extends UsageEntry {
   name: string;
   vendor: string | null;
   rows: TierRow[];
+  usageUrl?: string;
 }
 
 const cards = computed<UsageCard[]>(() =>
@@ -88,6 +91,30 @@ function onDragEnd() {
   commit();
 }
 
+// Load usage URLs for each provider
+async function loadUsageUrls() {
+  for (const card of ordered.value) {
+    try {
+      const url = await getProviderUsageUrl(card.provider_id);
+      if (url) {
+        card.usageUrl = url;
+      }
+    } catch (e) {
+      // Silently fail if URL lookup fails - non-critical feature
+      console.warn(`Failed to load usage URL for ${card.provider_id}:`, e);
+    }
+  }
+}
+
+// Open external URL in default browser
+async function openExternalUrl(url: string) {
+  try {
+    await openUrl(url);
+  } catch (e) {
+    msg.error(`无法打开链接：${String(e)}`);
+  }
+}
+
 function fmtPct(p: number): number {
   return Math.round(p * 10) / 10;
 }
@@ -131,7 +158,14 @@ const refreshSecs = computed(() =>
 
 onMounted(async () => {
   await Promise.all([config.loadAll(), runtime.refresh(), system.loadSettings()]);
+  // Load usage URLs after initial data is loaded
+  await loadUsageUrls();
 });
+
+// Watch for changes in ordered cards and reload URLs
+watch(ordered, () => {
+  loadUsageUrls();
+}, { deep: true });
 
 // Auto-refresh usage while the user stays on this page, at the configured interval
 // (read from settings; clamped to the 30s floor both here and in the backend).
@@ -152,7 +186,14 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
             <NSpace align="center" justify="space-between">
               <NSpace align="center" :size="8">
                 <span class="drag-handle" title="拖动排序">⠿</span>
-                <span class="name">{{ c.name }}</span>
+                <!-- Make provider name clickable if usage URL is available -->
+                <span
+                  v-if="c.usageUrl"
+                  class="name clickable"
+                  @click="openExternalUrl(c.usageUrl)"
+                  title="点击跳转到官方用量页面"
+                >{{ c.name }}</span>
+                <span v-else class="name">{{ c.name }}</span>
                 <NTag v-if="c.vendor" size="small" type="info">{{ vendorLabel(c.vendor) }}</NTag>
                 <NTooltip v-if="c.snapshot?.plan && c.snapshot.plan_info" placement="top">
                   <template #trigger>
@@ -215,6 +256,18 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
 <style scoped>
 .name {
   font-weight: 600;
+}
+.name.clickable {
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.name.clickable:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--sl-color-accent-6);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+  color: var(--sl-color-accent-7);
 }
 .mono {
   font-family: var(--sl-font-mono);

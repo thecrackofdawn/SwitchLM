@@ -255,6 +255,7 @@ pub fn run() {
             commands::set_model_fallback_strategies_enabled,
             commands::validate_fallback_context,
             commands::recognized_context_size,
+            commands::get_provider_usage_url,
             commands::set_custom_context_size,
             commands::get_model_health,
             commands::get_server_status,

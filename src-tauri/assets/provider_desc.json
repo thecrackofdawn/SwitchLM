@@ -3,6 +3,7 @@
   "providers": [
     {
       "provider_id": "zhipu",
+      "individual_usage_url": "https://bigmodel.cn/coding-plan/personal/usage",
       "models": [
         { "upstream_model_id": "glm-5.2", "context_size": 1000000 },
         { "upstream_model_id": "glm-5.1", "context_size": 200000 },
@@ -23,6 +24,7 @@
     },
     {
       "provider_id": "deepseek",
+      "individual_usage_url": "https://platform.deepseek.com/usage",
       "models": [
         { "upstream_model_id": "deepseek-v4-flash", "context_size": 1000000 },
         { "upstream_model_id": "deepseek-v4-pro", "context_size": 1000000 }
@@ -30,6 +32,7 @@
     },
     {
       "provider_id": "volcengine-agent",
+      "individual_usage_url": "https://console.volcengine.com/ark/region:cn-beijing/subscription/agent-plan",
       "models": [
         { "upstream_model_id": "doubao-seed-evolving", "context_size": 1000000 },
         { "upstream_model_id": "doubao-seed-2.1-turbo", "context_size": 256000 },
@@ -49,6 +52,7 @@
     },
     {
       "provider_id": "volcengine-coding",
+      "individual_usage_url": "https://console.volcengine.com/ark/region:cn-beijing/subscription/coding-plan",
       "models": [
         { "upstream_model_id": "auto", "context_size": 1000000 },
         { "upstream_model_id": "doubao-seed-2.1-turbo", "context_size": 256000 },
@@ -67,6 +71,7 @@
     },
     {
       "provider_id": "qianwen-token",
+      "individual_usage_url": "https://platform.qianwenai.com/home/billing/subscription/token-plan-individual",
       "models": [
         { "upstream_model_id": "qwen3.8-max", "context_size": 1000000 },
         { "upstream_model_id": "qwen3.8-max-preview", "context_size": 1000000 },

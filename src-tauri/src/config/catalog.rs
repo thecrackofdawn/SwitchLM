@@ -24,6 +24,9 @@ pub struct ProviderDesc {
     pub provider_id: String,
     #[serde(default)]
     pub models: Vec<ModelDesc>,
+    /// 个人套餐用量页面链接（用于套餐用量界面跳转）
+    #[serde(default)]
+    pub individual_usage_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -97,6 +100,7 @@ impl ProviderCatalog {
                 }
                 None => self.providers.push(ProviderDesc {
                     provider_id: vendor.into(),
+                    individual_usage_url: None,
                     models: vec![ModelDesc {
                         upstream_model_id: upstream_model_id.into(),
                         context_size: n,
@@ -198,6 +202,17 @@ mod tests {
                 assert!(m.context_size > 0, "{:?}/{:?} has zero size", p.provider_id, m.upstream_model_id);
             }
         }
+        // Verify that known providers have individual usage URLs
+        let zhipu = cat.providers.iter().find(|p| p.provider_id == "zhipu").unwrap();
+        assert_eq!(zhipu.individual_usage_url, Some("https://bigmodel.cn/coding-plan/personal/usage".to_string()));
+        let deepseek = cat.providers.iter().find(|p| p.provider_id == "deepseek").unwrap();
+        assert_eq!(deepseek.individual_usage_url, Some("https://platform.deepseek.com/usage".to_string()));
+        let volcagent = cat.providers.iter().find(|p| p.provider_id == "volcengine-agent").unwrap();
+        assert_eq!(volcagent.individual_usage_url, Some("https://console.volcengine.com/ark/region:cn-beijing/subscription/agent-plan".to_string()));
+        let volccoding = cat.providers.iter().find(|p| p.provider_id == "volcengine-coding").unwrap();
+        assert_eq!(volccoding.individual_usage_url, Some("https://console.volcengine.com/ark/region:cn-beijing/subscription/coding-plan".to_string()));
+        let qianwen = cat.providers.iter().find(|p| p.provider_id == "qianwen-token").unwrap();
+        assert_eq!(qianwen.individual_usage_url, Some("https://platform.qianwenai.com/home/billing/subscription/token-plan-individual".to_string()));
     }
 
     #[test]
@@ -230,6 +245,7 @@ mod tests {
             version: 1,
             providers: vec![ProviderDesc {
                 provider_id: "zhipu".into(),
+                individual_usage_url: None,
                 models: vec![
                     ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000 },
                     ModelDesc { upstream_model_id: "glm-5.2".into(), context_size: 1000000 },
@@ -242,6 +258,7 @@ mod tests {
                 // override existing model + supplement a new model under an existing provider
                 ProviderDesc {
                     provider_id: "zhipu".into(),
+                    individual_usage_url: None,
                     models: vec![
                         ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 999 },
                         ModelDesc { upstream_model_id: "custom-user".into(), context_size: 5000 },
@@ -250,6 +267,7 @@ mod tests {
                 // supplement an entirely new provider
                 ProviderDesc {
                     provider_id: "mycustom".into(),
+                    individual_usage_url: None,
                     models: vec![ModelDesc { upstream_model_id: "weird".into(), context_size: 7000 }],
                 },
             ],
@@ -267,6 +285,7 @@ mod tests {
             version: 1,
             providers: vec![ProviderDesc {
                 provider_id: "zhipu".into(),
+                individual_usage_url: None,
                 models: vec![ModelDesc { upstream_model_id: "glm-4.6".into(), context_size: 200000 }],
             }],
         };
@@ -339,6 +358,7 @@ mod tests {
             version: 1,
             providers: vec![ProviderDesc {
                 provider_id: "zhipu".into(),
+                individual_usage_url: None,
                 models: vec![ModelDesc {
                     upstream_model_id: "glm-4.6".into(),
                     context_size: 333333,
