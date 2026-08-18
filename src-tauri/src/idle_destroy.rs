@@ -111,10 +111,18 @@ fn recreate_main_window(app: &tauri::AppHandle) {
         // 而非窗口级 drag_and_drop（后者 Windows-only 且关闭的是另一套原生 DnD）。
         // 该方法是跨平台的，无需 cfg 门控。HTML5 拖拽重排（vuedraggable）依赖此关闭。
         .disable_drag_drop_handler();
-    if let Err(e) = builder.build() {
+    match builder.build() {
+        Ok(w) => {
+            // 重建的窗口不会自动置前：Windows 前台锁下，非前台进程新建的窗口只会在任务栏
+            // 出现图标、静悄悄落在当前前台窗口后面（自启隐藏→销毁→托盘唤起场景必现，
+            // 因为该进程从未成为前台）。托盘点击本身授予了前台激活权，显式 set_focus
+            // 即可真正置前。
+            let _ = w.set_focus();
+            tracing::info!("主窗口已销毁过，按托盘唤起重建并聚焦");
+        }
         // 极少情况：Destroyed 事件尚未处理完，label 仍占用。记录并放弃——
         // 用户下次点击托盘时 get_webview_window 会命中已存在的窗口走 show 分支。
-        tracing::warn!("重建主窗口失败（label 可能仍被占用）：{e}");
+        Err(e) => tracing::warn!("重建主窗口失败（label 可能仍被占用）：{e}"),
     }
 }
 

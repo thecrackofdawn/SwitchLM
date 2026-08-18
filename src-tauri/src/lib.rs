@@ -11,12 +11,29 @@ pub mod tray;
 pub mod usage;
 pub mod logging;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::proxy::{server, AppStateInner};
+
+/// True once an explicit exit request (`app.exit(0)` — 托盘退出 / quit_app IPC) has passed
+/// through `RunEvent::ExitRequested { code: Some }`. Distinguishes the clean-exit path from a
+/// Windows session end, which reaches `RunEvent::Exit` directly via `WM_ENDSESSION` with no
+/// prior request. See `exit_is_session_end`.
+static EXPLICIT_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// True when the event-loop `Exit` (tao `LoopDestroyed`) arrived **without** a prior explicit
+/// exit request — the Windows session-end (`WM_ENDSESSION`) signature.
+///
+/// In that state tao's runner is already `Destroyed` and dispatching any further message
+/// panics ("cannot move state from Destroyed", tao runner.rs:371 — 日志中每次关机必现).
+/// The process must therefore exit immediately instead of letting the loop pump on.
+fn exit_is_session_end(explicit_exit_requested: bool) -> bool {
+    !explicit_exit_requested
+}
 
 async fn start_proxy_with_retry(state: proxy::AppState, port: u16) {
     match server::serve_once(state.clone(), port).await {
@@ -292,9 +309,23 @@ pub fn run() {
             // 销毁最后一个窗口（含后台 webview 销毁）会触发 ExitRequested 且 code == None。
             // 此时必须 prevent_exit，否则代理 + 托盘会随 webview 一起退出。
             // 真正的退出（托盘 退出 / quit_app IPC）走 app.exit(0)，code == Some，放行。
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
-                if code.is_none() {
+            if let tauri::RunEvent::ExitRequested { code, ref api, .. } = event {
+                if code.is_some() {
+                    // 显式退出请求（托盘退出 / quit_app）：标记后放行，正常收尾路径走完
+                    // （ExitRequested → 销毁窗口 → Exit）。
+                    EXPLICIT_EXIT_REQUESTED.store(true, Ordering::SeqCst);
+                } else {
                     api.prevent_exit();
+                }
+            }
+            if let tauri::RunEvent::Exit = event {
+                // Windows 关机/注销：tao 在 WM_ENDSESSION 里同步送达 LoopDestroyed（即本
+                // Exit 事件），此时 tao runner 已处于 Destroyed 状态——若不立即退出，消息
+                // 泵会继续分发后续消息并 panic（"cannot move state from Destroyed"）。
+                // 立即硬退出：抢在那条消息之前，代理/托盘随系统关机一起结束是正确语义。
+                if exit_is_session_end(EXPLICIT_EXIT_REQUESTED.load(Ordering::SeqCst)) {
+                    tracing::info!("检测到系统会话结束（WM_ENDSESSION），立即退出");
+                    std::process::exit(0);
                 }
             }
         });
@@ -302,7 +333,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{autostart_needs_reenable, is_autostart_launch};
+    use super::{autostart_needs_reenable, exit_is_session_end, is_autostart_launch};
 
     #[test]
     fn autostart_flag_present() {
@@ -347,5 +378,19 @@ mod tests {
     fn autostart_needs_reenable_not_when_state_unverifiable() {
         // Probe errored → don't risk a wrong re-enable.
         assert!(!autostart_needs_reenable(true, None));
+    }
+
+    // ---- exit_is_session_end（关机 vs 显式退出的判定） ----
+
+    #[test]
+    fn session_end_detected_when_no_explicit_request() {
+        // WM_ENDSESSION 路径：未经 ExitRequested{code:Some} 直达 Exit → 会话结束。
+        assert!(exit_is_session_end(false));
+    }
+
+    #[test]
+    fn session_end_not_detected_after_explicit_exit_request() {
+        // 托盘退出 / quit_app：先经过 ExitRequested{code:Some} → 正常收尾。
+        assert!(!exit_is_session_end(true));
     }
 }
