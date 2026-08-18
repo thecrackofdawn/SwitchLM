@@ -317,11 +317,9 @@ usePolling(() => runtime.refresh(), () => refreshSecs.value * 1000);
                       </span>
                     </template>
                     <div style="display: flex; flex-direction: column; gap: 2px">
+                      <div>本窗口期内请求token数</div>
                       <span>输入：{{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.input_tokens) }} token</span>
                       <span>输出：{{ fmtNum(statsWindow(findStats(c.provider_id), row.key)!.output_tokens) }} token</span>
-                      <span v-if="statsWindow(findStats(c.provider_id), row.key)!.requests > 0">
-                        请求：{{ statsWindow(findStats(c.provider_id), row.key)!.requests }} 次
-                      </span>
                     </div>
                   </NTooltip>
                   <NTooltip>

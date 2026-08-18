@@ -149,16 +149,9 @@ pub fn run() {
                 crate::logging::level_filter_for(&cfg.settings.log_level),
             );
             let cfg_for_tray = cfg.clone();
-            let recorder: Option<std::sync::Arc<crate::recording::RequestRecorder>> =
-                if cfg.settings.request_recording {
-                    let (rec, rx) = crate::recording::RequestRecorder::channel();
-                    tauri::async_runtime::spawn(
-                        crate::recording::run_writer(rx, dir.join("request_log")),
-                    );
-                    Some(rec)
-                } else {
-                    None
-                };
+            // 请求记录功能已禁用(未上线,见 recording/mod.rs 顶部注释):即使配置中
+            // request_recording=true 也不挂载记录器,保持零开销。代码保留待后续观测功能。
+            let recorder: Option<std::sync::Arc<crate::recording::RequestRecorder>> = None;
             let state: proxy::AppState = Arc::new(AppStateInner {
                 config: tokio::sync::RwLock::new(cfg),
                 catalog: tokio::sync::RwLock::new(catalog),

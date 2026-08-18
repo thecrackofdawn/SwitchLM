@@ -1,4 +1,9 @@
 //! 请求记录:纯哈希函数(规范 JSON → SHA-256)。见 spec §6。
+//!
+//! 【功能已禁用,未上线】经本地验证,本地场景很难命中缓存(重复请求哈希命中率极低),
+//! 该功能价值不高,决定不上线:启动不挂载记录器、设置页入口已隐藏、开关命令已停用。
+//! 本模块代码完整保留,供后续"请求观测"功能(如全响应缓存、请求重放)复用;
+//! 重新启用时恢复 lib.rs 启动挂载 + set_request_recording + Settings.vue 卡片即可。
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};

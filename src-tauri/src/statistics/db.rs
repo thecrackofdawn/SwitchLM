@@ -5,10 +5,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::{ProviderStats, WindowStats, TokenUsage};
 use crate::usage::UsageSnapshot;
 
-/// Open (creating if needed) `usage_statistics.db` in `dir`. WAL + busy_timeout
-/// per spec §Performance. Bundled SQLite → no system dependency.
+/// Open (creating if needed) `switchlm.db` (the app-wide general-purpose
+/// database; usage statistics is currently its only tenant) in `dir`.
+/// WAL + busy_timeout per spec §Performance. Bundled SQLite → no system dependency.
 pub(crate) fn open(dir: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(dir.join("usage_statistics.db"))?;
+    let conn = Connection::open(dir.join("switchlm.db"))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     create_schema(&conn)?;

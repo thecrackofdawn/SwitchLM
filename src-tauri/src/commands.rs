@@ -1077,8 +1077,24 @@ pub async fn open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 开关请求记录:持久化设置 + 热切换运行时记录器(无需重启)。见 spec §8。
+/// 【功能已禁用,未上线】(见 recording/mod.rs 顶部注释):命令已停用,恒返回 None 记录器,
+/// 即使前端旧配置里开着也不会产生记录。代码保留待后续观测功能重新启用。
 #[tauri::command]
+#[allow(unused_variables)]
 pub async fn set_request_recording(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    // 禁用期实现:仅清空运行时记录器,不再按 enabled 挂载。
+    *state.recorder.write().unwrap() = None;
+    Ok(())
+}
+
+/// 开关请求记录的原始实现(禁用前的逻辑,原样保留):
+/// 持久化设置 + 热切换记录器。重新启用功能时恢复注册并改回调用本函数体。
+#[allow(dead_code)]
+async fn set_request_recording_impl(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     enabled: bool,

@@ -43,7 +43,7 @@ This specification defines a comprehensive usage statistics tracking system for 
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                  SQLite Database                             │
-│              (usage_statistics.db)                            │
+│              (switchlm.db — app-wide DB)                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 

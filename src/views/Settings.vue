@@ -196,7 +196,9 @@ onMounted(async () => {
       </NSpace>
     </NCard>
 
-    <NCard title="请求记录" size="small">
+    <!-- 请求记录功能已禁用(未上线):经本地验证本地很难命中缓存,功能价值不高,不上线。
+         代码保留待后续请求观测功能复用,重新启用时恢复下方卡片即可。 -->
+    <NCard v-if="false" title="请求记录" size="small">
       <NSpace vertical :size="10">
         <NSpace align="center" :size="12">
           <NSwitch
