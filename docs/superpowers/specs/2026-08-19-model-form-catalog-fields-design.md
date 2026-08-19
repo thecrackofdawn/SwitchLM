@@ -20,7 +20,8 @@ Models 页「新增/编辑模型」弹窗中的「上下文大小（token，目�
 - **选项来源**：前端静态列表（不动态从目录去重、不加后端查询命令）。
 - **档位**：上下文大小取目录高频档位；输出上限取 output 高频档位（见下）。
 - **预填**：目录（bundled）已收录的模型，两个字段在 fetch 时自动填入具体值（现状 context 已如此，output 对齐；填的是 effective 值 = 覆盖值或 bundled 默认）。
-- **提示与重置**：说明文字「同厂商共享，清空回退默认」简化为「同厂商共享」；每字段旁加「重置默认」按钮——把字段恢复为 **bundled 默认值**，保存时对等于默认值的字段写 null（清除覆盖）而非写入等值覆盖。
+- **提示与重置**：说明文字「同厂商共享，清空回退默认」简化为「同服务商共享」；每字段旁加「重置默认」按钮——把字段恢复为 **bundled 默认值**，保存时对等于默认值的字段写 null（清除覆盖）而非写入等值覆盖。
+- **文案调整**：「模型名称（即 upstream_model_id，发给上游）」改为「模型名称（即服务商提供的模型）」（upstream_model_id 术语不出现在用户 UI）。
 - **读取命令合并**：新增 `model_catalog_sizes` 一次返回两字段的 effective + default 四个值（watch 每次 provider/upstream 变化只发一次 IPC）；替代并删除 `recognized_context_size`（其唯一调用方就是本表单），不再单设 `recognized_output_size`。
 
 ## 设计
@@ -78,7 +79,9 @@ const OUTPUT_SIZE_OPTIONS = [
 - `lastRecognized = context.effective`、`lastRecognizedOutput = output.effective`（保存闸门，语义不变）。
 - 另存 `defaultContext = context.default`、`defaultOutput = output.default` 供重置按钮与保存归一使用。
 
-**重置按钮**：每字段旁 `<NButton size="tiny" quaternary :disabled="default === null">重置默认</NButton>`，点击把字段设回 `defaultContext` / `defaultOutput`。说明文字「同厂商共享，清空回退默认」改为「同厂商共享」（重置语义已由按钮承载，"清空回退默认"文案移除；clearable 仍保留——清空后不写覆盖、维持现状回退语义）。
+**重置按钮**：每字段旁 `<NButton size="tiny" quaternary :disabled="default === null">重置默认</NButton>`，点击把字段设回 `defaultContext` / `defaultOutput`。说明文字「同厂商共享，清空回退默认」改为「同服务商共享」（重置语义已由按钮承载，"清空回退默认"文案移除；clearable 仍保留——清空后不写覆盖、维持现状回退语义）。
+
+**模型名称标签**：`NFormItem` label 从「模型名称（即 upstream_model_id，发给上游）」改为「模型名称（即服务商提供的模型）」。
 
 **保存**：`save()` 在现有 context 分支旁加 output 分支——`form.output_size !== lastRecognizedOutput` 时调 `setCustomOutputSize(provider_id, upstream, out)`；失败 `msg.warning` 不阻断（与 context 分支一致）。
 
@@ -166,7 +169,7 @@ pub async fn set_custom_output_size(
 **前端**：
 
 - `pnpm exec vue-tsc --noEmit` 类型检查。
-- 人工验证：新增模型（bundled 模型预填、选档位/手输/清空）、编辑已有模型回填、重置默认按钮（有/无 bundled 默认两态）、自定义模型 output 覆盖后 OpenCode 同步生效（若开启同步）。
+- 人工验证：新增模型（bundled 模型预填、选档位/手输/清空）、编辑已有模型回填、重置默认按钮（有/无 bundled 默认两态）、新文案（同服务商共享 / 模型名称标签）、自定义模型 output 覆盖后 OpenCode 同步生效（若开启同步）。
 
 ## 实施顺序（供 plan 参考）
 
