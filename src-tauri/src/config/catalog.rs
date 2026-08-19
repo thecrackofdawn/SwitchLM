@@ -48,9 +48,14 @@ impl ProviderCatalog {
     }
 
     /// Catalog-only lookup (ignores any per-Model manual override). None if not bundled.
+    /// A `context_size == 0` entry counts as unknown: 0 is the sparse-file sentinel for
+    /// "this entry doesn't override the baseline context" (spec §3), so it must never leak
+    /// as a real size (classify_fallback / OpenCode limit.context would treat 0 as truth).
     /// `vendor` is the provider's vendor slug (the catalog keys groups by `provider_id == vendor`).
     pub fn context_size(&self, vendor: &str, upstream_model_id: &str) -> Option<u32> {
-        self.find_model(vendor, upstream_model_id).map(|m| m.context_size)
+        self.find_model(vendor, upstream_model_id)
+            .map(|m| m.context_size)
+            .filter(|&n| n > 0)
     }
 
     /// Output-size lookup (same keying as `context_size`). None when unknown/not bundled.
@@ -75,7 +80,10 @@ impl ProviderCatalog {
                             .iter_mut()
                             .find(|m| m.upstream_model_id == cm.upstream_model_id)
                         {
-                            existing.context_size = cm.context_size;
+                            // 哨兵 0 = 该条目不覆盖 baseline 的 context（仅带 output 覆盖）
+                            if cm.context_size > 0 {
+                                existing.context_size = cm.context_size;
+                            }
                             if cm.output_size.is_some() {
                                 existing.output_size = cm.output_size;
                             }
@@ -89,10 +97,13 @@ impl ProviderCatalog {
         }
     }
 
-    /// Set, override, or remove a single (vendor, upstream_model_id) entry in this catalog. Used
-    /// to mutate the **sparse** custom file: `Some(n)` sets/overrides the entry (creating the
-    /// provider group if absent), `None` removes it (and drops the provider group if it becomes
-    /// empty). Removing a non-existent entry is a no-op.
+    /// Set, override, or remove a single (vendor, upstream_model_id) entry's context override
+    /// in this catalog. Used to mutate the **sparse** custom file: `Some(n)` sets/overrides the
+    /// entry (creating the provider group if absent), `None` removes the context override.
+    /// Clearing keeps the entry (with `context_size = 0` sentinel) when it still carries an
+    /// output override, so the two overrides on one entry are independently removable; the
+    /// entry (and its provider group) is deleted only when neither override remains.
+    /// Removing a non-existent entry is a no-op.
     pub fn set_context_size(&mut self, vendor: &str, upstream_model_id: &str, size: Option<u32>) {
         let group = self.providers.iter_mut().find(|p| p.provider_id == vendor);
         match size {
@@ -124,9 +135,81 @@ impl ProviderCatalog {
             },
             None => {
                 if let Some(g) = group {
+                    if let Some(existing) = g
+                        .models
+                        .iter_mut()
+                        .find(|m| m.upstream_model_id == upstream_model_id)
+                    {
+                        if existing.output_size.is_some() {
+                            // output 覆盖还在：置哨兵保留条目，不删
+                            existing.context_size = 0;
+                            return;
+                        }
+                    }
                     g.models.retain(|m| m.upstream_model_id != upstream_model_id);
                     if g.models.is_empty() {
                         self.providers.retain(|p| p.provider_id != vendor);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set, override, or remove the output-size override for a (vendor, upstream_model_id)
+    /// entry - the output-side twin of `set_context_size`. `Some(n)` sets/overrides (creating
+    /// the entry with `context_size = 0` sentinel + the provider group if absent, so a fresh
+    /// output-only override never touches the baseline context). `None` removes the override
+    /// (serde `skip_serializing_if` drops the key from disk); the entry is deleted entirely
+    /// only when its context is also the 0 sentinel (neither override remains). No-op on a
+    /// missing entry.
+    pub fn set_output_size(&mut self, vendor: &str, upstream_model_id: &str, size: Option<u32>) {
+        let group = self.providers.iter_mut().find(|p| p.provider_id == vendor);
+        match size {
+            Some(n) => match group {
+                Some(g) => {
+                    if let Some(existing) = g
+                        .models
+                        .iter_mut()
+                        .find(|m| m.upstream_model_id == upstream_model_id)
+                    {
+                        existing.output_size = Some(n);
+                    } else {
+                        g.models.push(ModelDesc {
+                            upstream_model_id: upstream_model_id.into(),
+                            context_size: 0,
+                            output_size: Some(n),
+                        });
+                    }
+                }
+                None => self.providers.push(ProviderDesc {
+                    provider_id: vendor.into(),
+                    individual_usage_url: None,
+                    models: vec![ModelDesc {
+                        upstream_model_id: upstream_model_id.into(),
+                        context_size: 0,
+                        output_size: Some(n),
+                    }],
+                }),
+            },
+            None => {
+                if let Some(g) = group {
+                    let only_output = g
+                        .models
+                        .iter()
+                        .find(|m| m.upstream_model_id == upstream_model_id)
+                        .map(|m| m.context_size == 0)
+                        .unwrap_or(false);
+                    if only_output {
+                        g.models.retain(|m| m.upstream_model_id != upstream_model_id);
+                        if g.models.is_empty() {
+                            self.providers.retain(|p| p.provider_id != vendor);
+                        }
+                    } else if let Some(existing) = g
+                        .models
+                        .iter_mut()
+                        .find(|m| m.upstream_model_id == upstream_model_id)
+                    {
+                        existing.output_size = None;
                     }
                 }
             }
@@ -140,7 +223,9 @@ pub fn custom_catalog_path(dir: &Path) -> PathBuf {
     dir.join("custom_provider_desc.json")
 }
 
-fn parse_embedded() -> ProviderCatalog {
+/// Parse the embedded baseline catalog. Besides the startup path, `model_catalog_sizes`
+/// uses this to read bundled defaults while bypassing custom overrides.
+pub(crate) fn parse_embedded() -> ProviderCatalog {
     serde_json::from_str(EMBEDDED_CATALOG).unwrap_or_else(|e| {
         tracing::error!("内嵌 catalog 解析失败，降级为空：{e}");
         ProviderCatalog::default()
@@ -396,5 +481,177 @@ mod tests {
         save_custom_catalog(dir.path(), &custom).unwrap();
         let cat = ensure_catalog(dir.path());
         assert_eq!(cat.context_size("zhipu", "glm-4.6"), Some(333333), "saved custom overlays baseline");
+    }
+
+    // ---- set_output_size + 哨兵规则（spec §3）----
+
+    #[test]
+    fn set_output_size_updates_existing_entry() {
+        let mut c = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-4.6".into(),
+                    context_size: 200000,
+                    output_size: Some(128000),
+                }],
+            }],
+        };
+        c.set_output_size("zhipu", "glm-4.6", Some(96000));
+        assert_eq!(c.output_size("zhipu", "glm-4.6"), Some(96000));
+        assert_eq!(c.context_size("zhipu", "glm-4.6"), Some(200000), "context 不动");
+    }
+
+    #[test]
+    fn set_output_size_creates_entry_with_sentinel_context() {
+        let mut c = ProviderCatalog::default();
+        // 不存在的条目：新建（context=0 哨兵 = 未覆盖）
+        c.set_output_size("zhipu", "glm-custom", Some(4096));
+        assert_eq!(c.output_size("zhipu", "glm-custom"), Some(4096));
+        // custom 文件本体保留哨兵 0（struct 直读，不走 context_size() 的 0→None 映射）
+        let m = c.find_model("zhipu", "glm-custom").unwrap();
+        assert_eq!(m.context_size, 0);
+        // 不存在的 provider 组：建组
+        c.set_output_size("myvendor", "weird", Some(8192));
+        assert_eq!(c.output_size("myvendor", "weird"), Some(8192));
+    }
+
+    #[test]
+    fn set_output_size_none_removes_entry_when_context_is_sentinel() {
+        let mut c = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-custom".into(),
+                    context_size: 0,
+                    output_size: Some(4096),
+                }],
+            }],
+        };
+        c.set_output_size("zhipu", "glm-custom", None);
+        assert!(c.providers.iter().all(|p| p.provider_id != "zhipu"), "组空则删组");
+    }
+
+    #[test]
+    fn set_output_size_none_keeps_entry_when_context_override_exists() {
+        let mut c = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-4.6".into(),
+                    context_size: 999,
+                    output_size: Some(40000),
+                }],
+            }],
+        };
+        c.set_output_size("zhipu", "glm-4.6", None);
+        assert_eq!(c.output_size("zhipu", "glm-4.6"), None, "output 覆盖已清");
+        assert_eq!(c.context_size("zhipu", "glm-4.6"), Some(999), "context 覆盖保留");
+    }
+
+    #[test]
+    fn set_output_size_none_on_missing_entry_is_noop() {
+        let mut c = ProviderCatalog::default();
+        c.set_output_size("zhipu", "nope", None);
+        assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn set_context_size_none_keeps_entry_when_output_override_exists() {
+        // 修正既有缺陷：清 context 覆盖不再连带丢掉同条目的 output 覆盖（spec §3 末段）
+        let mut c = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-4.6".into(),
+                    context_size: 999,
+                    output_size: Some(40000),
+                }],
+            }],
+        };
+        c.set_context_size("zhipu", "glm-4.6", None);
+        assert_eq!(c.context_size("zhipu", "glm-4.6"), None, "context 视为未覆盖");
+        let m = c.find_model("zhipu", "glm-4.6").expect("条目保留（output 覆盖还在）");
+        assert_eq!(m.context_size, 0, "哨兵写入");
+        assert_eq!(m.output_size, Some(40000));
+    }
+
+    #[test]
+    fn overlay_sentinel_context_keeps_baseline() {
+        // custom 条目 context=0 → baseline context 保留；output 覆盖生效
+        let mut base = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-4.6".into(),
+                    context_size: 200000,
+                    output_size: Some(128000),
+                }],
+            }],
+        };
+        let custom = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-4.6".into(),
+                    context_size: 0,
+                    output_size: Some(96000),
+                }],
+            }],
+        };
+        base.overlay_custom(&custom);
+        assert_eq!(base.context_size("zhipu", "glm-4.6"), Some(200000), "哨兵不覆盖 baseline context");
+        assert_eq!(base.output_size("zhipu", "glm-4.6"), Some(96000), "output 覆盖生效");
+    }
+
+    #[test]
+    fn overlay_sentinel_context_without_baseline_merges_as_unknown() {
+        // baseline 无该条目：按 0 合并，context_size() 把 0 视同未收录 → None
+        let mut base = ProviderCatalog::default();
+        let custom = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "glm-custom".into(),
+                    context_size: 0,
+                    output_size: Some(4096),
+                }],
+            }],
+        };
+        base.overlay_custom(&custom);
+        assert_eq!(base.context_size("zhipu", "glm-custom"), None, "0 视同未收录");
+        assert_eq!(base.output_size("zhipu", "glm-custom"), Some(4096));
+    }
+
+    #[test]
+    fn context_size_zero_treated_as_unknown() {
+        // context_size() 语义修正：0 → None（防 classify_fallback / resolve_limits 把 0 当真值）
+        let c = ProviderCatalog {
+            version: 1,
+            providers: vec![ProviderDesc {
+                provider_id: "zhipu".into(),
+                individual_usage_url: None,
+                models: vec![ModelDesc {
+                    upstream_model_id: "weird".into(),
+                    context_size: 0,
+                    output_size: None,
+                }],
+            }],
+        };
+        assert_eq!(c.context_size("zhipu", "weird"), None);
     }
 }
