@@ -215,6 +215,17 @@ export interface ContextCheckResult {
   fallback_size?: number | null;
 }
 
+// Mirrors src-tauri `CatalogSizes` (commands.rs): catalog sizes for a
+// (provider, upstream_model) pair - effective (custom override or bundled
+// default, what the form pre-fills) vs default (bundled value, bypassing
+// overrides - the reset button target). null = not in the catalog.
+export interface CatalogSizes {
+  context_effective: number | null;
+  context_default: number | null;
+  output_effective: number | null;
+  output_default: number | null;
+}
+
 /** `qianwen-login-status` event payload emitted by the backend during/after the in-app login flow. */
 export interface QianwenLoginStatus {
   provider_id: string;

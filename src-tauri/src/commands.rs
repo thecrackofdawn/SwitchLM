@@ -763,7 +763,15 @@ pub async fn set_custom_context_size(
     };
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let mut custom = crate::config::catalog::load_custom(&dir);
+    // No-op short-circuit: skip the disk write + in-memory swap when the call wouldn't
+    // change the sparse custom catalog (clearing an absent entry, or setting the value
+    // it already has). Saves of bundled-unchanged models then cost no write, and a
+    // malformed custom file that `load_custom` ignored is never re-saved as empty.
+    let before = custom.clone();
     custom.set_context_size(&vendor, &upstream_model_id, context_size);
+    if custom == before {
+        return Ok(());
+    }
     crate::config::catalog::save_custom_catalog(&dir, &custom).map_err(|e| e.to_string())?;
     let effective = crate::config::catalog::effective_catalog(&custom);
     *state.catalog.write().await = effective;
@@ -789,7 +797,15 @@ async fn set_custom_output_size_core(
             .ok_or_else(|| format!("provider {provider_id} not found"))?
     };
     let mut custom = crate::config::catalog::load_custom(dir);
+    // No-op short-circuit: same rationale as `set_custom_context_size` - skip the disk
+    // write + in-memory swap when the call wouldn't change the sparse custom catalog,
+    // so a redundant save never creates/rewrites (and never empties a malformed)
+    // custom_provider_desc.json.
+    let before = custom.clone();
     custom.set_output_size(&vendor, &upstream_model_id, output_size);
+    if custom == before {
+        return Ok(());
+    }
     crate::config::catalog::save_custom_catalog(dir, &custom).map_err(|e| e.to_string())?;
     let effective = crate::config::catalog::effective_catalog(&custom);
     *state.catalog.write().await = effective;
@@ -2323,6 +2339,17 @@ mod tests {
         let on_disk = std::fs::read_to_string(dir.path().join("custom_provider_desc.json")).unwrap();
         assert!(on_disk.contains("96000"), "写入 custom_provider_desc.json");
 
+        // context 覆盖：复现 set_custom_context_size 的读写序列（该命令无 core 拆分）——
+        // 低层 API 变更 sparse 文件 + effective_catalog 重建换入，覆盖 effective≠default 的读取分离
+        let mut custom = crate::config::catalog::load_custom(dir.path());
+        custom.set_context_size("zhipu", "glm-4.6", Some(999));
+        crate::config::catalog::save_custom_catalog(dir.path(), &custom).unwrap();
+        *state.catalog.write().await = crate::config::catalog::effective_catalog(&custom);
+        let s = catalog_sizes_core(&state, "p1", "glm-4.6").await;
+        assert_eq!(s.context_effective, Some(999), "context 覆盖生效（effective≠default）");
+        assert_eq!(s.context_default, Some(200000), "default 仍是 bundled 原值");
+        assert_eq!(s.output_effective, Some(96000), "同条目 output 覆盖不受影响");
+
         // 未收录模型：四值全 None
         let s = catalog_sizes_core(&state, "p1", "nope").await;
         assert_eq!(s.context_effective, None);
@@ -2343,5 +2370,71 @@ mod tests {
             usage_creds: None,
         });
         *state.config.write().await = cfg;
+    }
+
+    /// set 命令的 no-op 短路：无实际变化的调用不写盘（不创建/重写 custom 文件），
+    /// 也不会把 load_custom 忽略掉的 malformed 文件覆盖为空 catalog。
+    #[tokio::test]
+    async fn set_custom_size_noop_skips_disk_write() {
+        use crate::proxy::AppStateInner;
+        let dir = tempfile::tempdir().unwrap();
+        let state: AppState =
+            Arc::new(AppStateInner::load(dir.path(), Arc::new(MemoryStore::default())).unwrap());
+        cfg_with_zhipu_provider(&state).await;
+        // 尚无 custom 文件；对不存在条目清除 output 覆盖 = no-op → 不得创建文件
+        set_custom_output_size_core(
+            dir.path(),
+            &state,
+            "p1".into(),
+            "glm-4.6".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !dir.path().join("custom_provider_desc.json").exists(),
+            "no-op 不创建 custom 文件"
+        );
+
+        // 与现状等值 = no-op，不重写文件（mtime 不变证明未写盘）
+        set_custom_output_size_core(
+            dir.path(),
+            &state,
+            "p1".into(),
+            "glm-4.6".into(),
+            Some(96000),
+        )
+        .await
+        .unwrap();
+        let path = dir.path().join("custom_provider_desc.json");
+        let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        set_custom_output_size_core(
+            dir.path(),
+            &state,
+            "p1".into(),
+            "glm-4.6".into(),
+            Some(96000),
+        )
+        .await
+        .unwrap();
+        let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "等值重设不写盘");
+
+        // malformed custom 文件不被 no-op 调用清空
+        std::fs::write(&path, "{not json").unwrap();
+        set_custom_output_size_core(
+            dir.path(),
+            &state,
+            "p1".into(),
+            "glm-4.6".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{not json",
+            "no-op 不覆盖 malformed 文件"
+        );
     }
 }

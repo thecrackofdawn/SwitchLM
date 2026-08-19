@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentSyncStatus,
+  CatalogSizes,
   ConnectionTest,
   ContextCheckResult,
   DiscoveredModel,
@@ -74,15 +75,6 @@ export const modelEffectiveFallbacks = () =>
   invoke<ModelEffectiveFallback[]>("model_effective_fallbacks");
 export const validateFallbackContext = (primaryId: string, fallbackId: string) =>
   invoke<ContextCheckResult>("validate_fallback_context", { primaryId, fallbackId });
-/** Catalog sizes for a (provider, upstream_model) pair: effective (custom override or
- *  bundled default - what the form pre-fills) vs default (bundled value, bypassing
- *  overrides - the reset button target). null = not in the catalog. */
-export interface CatalogSizes {
-  context_effective: number | null;
-  context_default: number | null;
-  output_effective: number | null;
-  output_default: number | null;
-}
 
 export const modelCatalogSizes = (providerId: string, upstreamModelId: string) =>
   invoke<CatalogSizes>("model_catalog_sizes", { providerId, upstreamModelId });
