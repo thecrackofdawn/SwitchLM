@@ -74,8 +74,18 @@ export const modelEffectiveFallbacks = () =>
   invoke<ModelEffectiveFallback[]>("model_effective_fallbacks");
 export const validateFallbackContext = (primaryId: string, fallbackId: string) =>
   invoke<ContextCheckResult>("validate_fallback_context", { primaryId, fallbackId });
-export const recognizedContextSize = (providerId: string, upstreamModelId: string) =>
-  invoke<number | null>("recognized_context_size", { providerId, upstreamModelId });
+/** Catalog sizes for a (provider, upstream_model) pair: effective (custom override or
+ *  bundled default - what the form pre-fills) vs default (bundled value, bypassing
+ *  overrides - the reset button target). null = not in the catalog. */
+export interface CatalogSizes {
+  context_effective: number | null;
+  context_default: number | null;
+  output_effective: number | null;
+  output_default: number | null;
+}
+
+export const modelCatalogSizes = (providerId: string, upstreamModelId: string) =>
+  invoke<CatalogSizes>("model_catalog_sizes", { providerId, upstreamModelId });
 
 /** Set/clear a custom context-size override for a (provider, upstream_model) pair.
  *  Writes custom_provider_desc.json + updates the in-memory catalog (real-time, same-vendor).
@@ -85,6 +95,14 @@ export const setCustomContextSize = (
   upstreamModelId: string,
   contextSize: number | null,
 ) => invoke<void>("set_custom_context_size", { providerId, upstreamModelId, contextSize });
+
+/** Set/clear a custom output-size override (OpenCode limit.output). Same semantics as
+ *  setCustomContextSize; `null` clears -> reverts to the bundled default. */
+export const setCustomOutputSize = (
+  providerId: string,
+  upstreamModelId: string,
+  outputSize: number | null,
+) => invoke<void>("set_custom_output_size", { providerId, upstreamModelId, outputSize });
 
 // ---- discover + connection test ----
 export const discoverModels = (providerId: string) =>
