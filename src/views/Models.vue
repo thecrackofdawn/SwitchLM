@@ -359,7 +359,7 @@ onMounted(() => config.loadAll());
               placeholder="未识别"
               style="width: 200px"
             />
-            <NButton size="tiny" quaternary :disabled="defaultContext === null" @click="form.context_size = defaultContext">重置默认</NButton>
+            <NButton size="small" :disabled="defaultContext === null" @click="form.context_size = defaultContext">恢复默认值</NButton>
             <span class="muted">同服务商共享</span>
           </NSpace>
         </NFormItem>
@@ -375,7 +375,7 @@ onMounted(() => config.loadAll());
               placeholder="未收录"
               style="width: 200px"
             />
-            <NButton size="tiny" quaternary :disabled="defaultOutput === null" @click="form.output_size = defaultOutput">重置默认</NButton>
+            <NButton size="small" :disabled="defaultOutput === null" @click="form.output_size = defaultOutput">恢复默认值</NButton>
             <span class="muted">同服务商共享</span>
           </NSpace>
         </NFormItem>
