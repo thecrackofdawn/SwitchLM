@@ -665,21 +665,25 @@ pub async fn validate_fallback_context(
     Ok(classify_fallback(&pv, &pu, &fv, &fu, &catalog))
 }
 
-/// Catalog-only recognized context size for a (provider, upstream_model) pair - the effective
-/// size (custom_provider_desc.json override if set, else bundled default). Returns None when the
-/// pair isn't recognized. Resolves the provider's vendor under the config read lock, then takes
-/// the catalog read lock. This is also what the Models page edits via `set_custom_context_size`.
-///
-/// Returns `Result` because Tauri requires async commands with reference inputs (here
-/// `State<'_, AppState>`) to return a `Result`; the Ok payload is still `Option<u32>` (serialized
-/// as `number | null`), so the frontend `invoke<number | null>` contract is unchanged. The error
-/// variant is never produced.
-#[tauri::command]
-pub async fn recognized_context_size(
-    state: State<'_, AppState>,
-    provider_id: String,
-    upstream_model_id: String,
-) -> Result<Option<u32>, String> {
+/// Effective + bundled-default catalog sizes for a (provider, upstream_model) pair, both
+/// fields (context & output). "Effective" comes from the in-memory catalog (custom override
+/// if set, else bundled default) - what the form pre-fills and what the proxy/OpenCode sync
+/// actually use. "Default" re-reads the embedded baseline (`parse_embedded`), bypassing
+/// custom overrides - the reset button's target and the save-normalization reference.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogSizes {
+    pub context_effective: Option<u32>,
+    pub context_default: Option<u32>,
+    pub output_effective: Option<u32>,
+    pub output_default: Option<u32>,
+}
+
+/// Core of `model_catalog_sizes`, testable without tauri State.
+pub(crate) async fn catalog_sizes_core(
+    state: &AppState,
+    provider_id: &str,
+    upstream_model_id: &str,
+) -> CatalogSizes {
     let vendor = {
         let cfg = state.config.read().await;
         cfg.providers
@@ -688,8 +692,25 @@ pub async fn recognized_context_size(
             .map(|p| p.vendor.clone())
             .unwrap_or_default()
     };
+    let baseline = crate::config::catalog::parse_embedded();
     let catalog = state.catalog.read().await;
-    Ok(catalog.context_size(&vendor, &upstream_model_id))
+    CatalogSizes {
+        context_effective: catalog.context_size(&vendor, upstream_model_id),
+        context_default: baseline.context_size(&vendor, upstream_model_id),
+        output_effective: catalog.output_size(&vendor, upstream_model_id),
+        output_default: baseline.output_size(&vendor, upstream_model_id),
+    }
+}
+
+/// See `catalog_sizes_core`. Returns `Result` because Tauri requires async commands with
+/// reference inputs to return a `Result`; the error variant is never produced.
+#[tauri::command]
+pub async fn model_catalog_sizes(
+    state: State<'_, AppState>,
+    provider_id: String,
+    upstream_model_id: String,
+) -> Result<CatalogSizes, String> {
+    Ok(catalog_sizes_core(&state, &provider_id, &upstream_model_id).await)
 }
 
 /// Get the individual usage URL for a provider's vendor from the catalog. Returns None when
@@ -747,6 +768,47 @@ pub async fn set_custom_context_size(
     let effective = crate::config::catalog::effective_catalog(&custom);
     *state.catalog.write().await = effective;
     Ok(())
+}
+
+/// Core of `set_custom_output_size`, testable without a tauri AppHandle (the AppHandle only
+/// resolves the AppData dir). Mirrors `set_custom_context_size`: write disk first, then
+/// re-derive the in-memory catalog under the write lock.
+async fn set_custom_output_size_core(
+    dir: &std::path::Path,
+    state: &AppState,
+    provider_id: String,
+    upstream_model_id: String,
+    output_size: Option<u32>,
+) -> Result<(), String> {
+    let vendor = {
+        let cfg = state.config.read().await;
+        cfg.providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .map(|p| p.vendor.clone())
+            .ok_or_else(|| format!("provider {provider_id} not found"))?
+    };
+    let mut custom = crate::config::catalog::load_custom(dir);
+    custom.set_output_size(&vendor, &upstream_model_id, output_size);
+    crate::config::catalog::save_custom_catalog(dir, &custom).map_err(|e| e.to_string())?;
+    let effective = crate::config::catalog::effective_catalog(&custom);
+    *state.catalog.write().await = effective;
+    Ok(())
+}
+
+/// Set (or clear, when `output_size` is None) the user's custom output-size override for a
+/// (provider, upstream_model_id) pair - the output-side twin of `set_custom_context_size`.
+/// Same real-time, same-vendor, sparse-file semantics; see that command's doc for the model.
+#[tauri::command]
+pub async fn set_custom_output_size(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    provider_id: String,
+    upstream_model_id: String,
+    output_size: Option<u32>,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    set_custom_output_size_core(&dir, &state, provider_id, upstream_model_id, output_size).await
 }
 
 /// Per-model breaker state (for tray/UI cooling indicators). Recovers any model whose
@@ -2224,5 +2286,62 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("reset never applied");
+    }
+
+    // ---- model_catalog_sizes / set_custom_output_size（spec §2）----
+
+    #[tokio::test]
+    async fn model_catalog_sizes_reports_effective_and_default() {
+        use crate::proxy::AppStateInner;
+        let dir = tempfile::tempdir().unwrap();
+        let state: AppState =
+            Arc::new(AppStateInner::load(dir.path(), Arc::new(MemoryStore::default())).unwrap());
+        cfg_with_zhipu_provider(&state).await;
+
+        // bundled 模型：effective == default == bundled 值
+        let s = catalog_sizes_core(&state, "p1", "glm-4.6").await;
+        assert_eq!(s.context_default, Some(200000));
+        assert_eq!(s.context_effective, Some(200000));
+        assert_eq!(s.output_default, Some(128000));
+        assert_eq!(s.output_effective, Some(128000));
+
+        // 写入 output 覆盖后：output_effective 变、output_default 不变（bundled 原值）
+        set_custom_output_size_core(
+            dir.path(),
+            &state,
+            "p1".into(),
+            "glm-4.6".into(),
+            Some(96000),
+        )
+        .await
+        .unwrap();
+        let s = catalog_sizes_core(&state, "p1", "glm-4.6").await;
+        assert_eq!(s.output_effective, Some(96000), "覆盖生效");
+        assert_eq!(s.output_default, Some(128000), "default 仍是 bundled 原值");
+        assert_eq!(s.context_effective, Some(200000), "context 不受影响");
+        // 覆盖已落盘 custom 文件
+        let on_disk = std::fs::read_to_string(dir.path().join("custom_provider_desc.json")).unwrap();
+        assert!(on_disk.contains("96000"), "写入 custom_provider_desc.json");
+
+        // 未收录模型：四值全 None
+        let s = catalog_sizes_core(&state, "p1", "nope").await;
+        assert_eq!(s.context_effective, None);
+        assert_eq!(s.output_effective, None);
+        assert_eq!(s.context_default, None);
+        assert_eq!(s.output_default, None);
+    }
+
+    /// helper：给 state 塞一个 vendor=zhipu 的 provider（id=p1）
+    async fn cfg_with_zhipu_provider(state: &AppState) {
+        let mut cfg = state.config.read().await.clone();
+        cfg.providers.push(Provider {
+            id: "p1".into(),
+            vendor: "zhipu".into(),
+            display_name: "智谱".into(),
+            openai_base_url: Some("https://x/v1".into()),
+            anthropic_base_url: None,
+            usage_creds: None,
+        });
+        *state.config.write().await = cfg;
     }
 }
