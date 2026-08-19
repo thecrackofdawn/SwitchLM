@@ -8,6 +8,21 @@ use std::task::{Context, Poll};
 
 use super::TokenUsage;
 
+/// Sum `input_tokens` with the prompt-cache halves (`cache_read_input_tokens` /
+/// `cache_creation_input_tokens`). Anthropic usage semantics: `input_tokens` is
+/// the UNCACHED remainder only — total prompt = input + cache_read + cache_creation.
+/// 智谱's Anthropic endpoint follows this split (verified live: input=6 +
+/// cache_read=1216 for a 1222-token prompt), and its console bills all three, so
+/// statistics must sum them to match. Cache fields absent → plain `input_tokens`.
+fn anthropic_total_input(usage: &Value) -> Option<u64> {
+    let input = usage["input_tokens"].as_u64()?;
+    let cached = ["cache_read_input_tokens", "cache_creation_input_tokens"]
+        .iter()
+        .filter_map(|k| usage[*k].as_u64())
+        .sum::<u64>();
+    Some(input + cached)
+}
+
 /// Extract (input, output) from an already-parsed upstream response body.
 /// Pure — no I/O, no stream consumption. Missing fields degrade to (None, None);
 /// total-only vendors get (Some(total), Some(0)) (spec §Extraction Implementation).
@@ -15,7 +30,7 @@ pub fn extract_tokens_from_json(body: &Value, upstream_protocol: ClientProtocol)
     let usage = &body["usage"];
     let (input, output) = match upstream_protocol {
         ClientProtocol::OpenAI => (usage["prompt_tokens"].as_u64(), usage["completion_tokens"].as_u64()),
-        ClientProtocol::Anthropic => (usage["input_tokens"].as_u64(), usage["output_tokens"].as_u64()),
+        ClientProtocol::Anthropic => (anthropic_total_input(usage), usage["output_tokens"].as_u64()),
     };
     match (input, output) {
         (i @ Some(_), o @ Some(_)) => (i, o),
@@ -61,11 +76,23 @@ impl StreamingTokenCollector {
             }
             ClientProtocol::Anthropic => match chunk.get("type").and_then(|t| t.as_str()) {
                 Some("message_start") => {
-                    self.input_tokens = chunk["message"]["usage"]["input_tokens"].as_u64();
+                    // Cache halves ride in message_start usage (standard Anthropic);
+                    // sum them per anthropic_total_input semantics.
+                    let usage = &chunk["message"]["usage"];
+                    self.input_tokens = anthropic_total_input(usage);
                     false
                 }
                 Some("message_delta") => {
-                    self.output_tokens = chunk["usage"]["output_tokens"].as_u64();
+                    // The final usage. 智谱 quirk (verified live): message_start
+                    // carries a placeholder {input_tokens: 0, output_tokens: 0} and
+                    // the REAL usage — input incl. cache halves — arrives only here.
+                    // So a delta input always replaces the start value; without an
+                    // input field the start value stands.
+                    let usage = &chunk["usage"];
+                    if let Some(total) = anthropic_total_input(usage) {
+                        self.input_tokens = Some(total);
+                    }
+                    self.output_tokens = usage["output_tokens"].as_u64();
                     self.input_tokens.is_some() // complete when both present
                 }
                 _ => false,
@@ -259,6 +286,42 @@ mod tests {
         assert_eq!(c.tokens(), (Some(25), None));
         assert!(c.ingest(&json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 50}})));
         assert_eq!(c.tokens(), (Some(25), Some(50)));
+    }
+
+    #[test]
+    fn anthropic_non_stream_cache_fields_sum_into_input() {
+        // Anthropic usage semantics: input_tokens is the UNCACHED remainder only;
+        // total prompt = input + cache_read + cache_creation. 智谱 puts real values
+        // in these fields (verified live: input=6 + cache_read=1216 for a 1222-token
+        // prompt), so summing is required for stats to match the vendor console.
+        let body = json!({"usage": {"input_tokens": 6, "cache_read_input_tokens": 1216, "cache_creation_input_tokens": 10, "output_tokens": 3}});
+        assert_eq!(extract_tokens_from_json(&body, ClientProtocol::Anthropic), (Some(1232), Some(3)));
+        // Cache fields alone still yield a total.
+        let body = json!({"usage": {"input_tokens": 0, "cache_read_input_tokens": 900, "output_tokens": 5}});
+        assert_eq!(extract_tokens_from_json(&body, ClientProtocol::Anthropic), (Some(900), Some(5)));
+    }
+
+    #[test]
+    fn anthropic_stream_message_start_cache_fields_sum_into_input() {
+        // Standard Anthropic streams carry the cache split in message_start.
+        let mut c = StreamingTokenCollector::new(ClientProtocol::Anthropic);
+        assert!(!c.ingest(&json!({"type": "message_start", "message": {"usage": {"input_tokens": 25, "cache_read_input_tokens": 900}}})));
+        assert_eq!(c.tokens(), (Some(925), None));
+        assert!(c.ingest(&json!({"type": "message_delta", "usage": {"output_tokens": 50}})));
+        assert_eq!(c.tokens(), (Some(925), Some(50)));
+    }
+
+    #[test]
+    fn anthropic_stream_final_usage_in_message_delta_overrides_placeholder_start() {
+        // 智谱 streaming quirk (verified live): message_start carries a placeholder
+        // {"input_tokens": 0, "output_tokens": 0}; the REAL usage — including
+        // cache_read_input_tokens — arrives only in the final message_delta.
+        // The collector must take the delta's input (incl. cache) as the final value
+        // instead of freezing the placeholder 0 from message_start.
+        let mut c = StreamingTokenCollector::new(ClientProtocol::Anthropic);
+        assert!(!c.ingest(&json!({"type": "message_start", "message": {"usage": {"input_tokens": 0, "output_tokens": 0}}})));
+        assert!(c.ingest(&json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 64, "output_tokens": 3, "cache_read_input_tokens": 1152}})));
+        assert_eq!(c.tokens(), (Some(1216), Some(3)));
     }
 
     #[test]

@@ -86,18 +86,18 @@ pub(crate) fn record_request(
         ON CONFLICT(provider_id) DO UPDATE SET
             vendor = ?2,
             provider_type = ?3,
-            last_5h_requests      = last_5h_requests + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL THEN 1 ELSE 0 END,
-            last_5h_tokenized_requests = last_5h_tokenized_requests + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL AND ?4 THEN 1 ELSE 0 END,
-            last_5h_input_tokens  = last_5h_input_tokens + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL THEN ?5 ELSE 0 END,
-            last_5h_output_tokens = last_5h_output_tokens + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL THEN ?6 ELSE 0 END,
-            last_1w_requests      = last_1w_requests + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL THEN 1 ELSE 0 END,
-            last_1w_tokenized_requests = last_1w_tokenized_requests + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL AND ?4 THEN 1 ELSE 0 END,
-            last_1w_input_tokens  = last_1w_input_tokens + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL THEN ?5 ELSE 0 END,
-            last_1w_output_tokens = last_1w_output_tokens + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL THEN ?6 ELSE 0 END,
-            last_1m_requests      = last_1m_requests + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL THEN 1 ELSE 0 END,
-            last_1m_tokenized_requests = last_1m_tokenized_requests + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL AND ?4 THEN 1 ELSE 0 END,
-            last_1m_input_tokens  = last_1m_input_tokens + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL THEN ?5 ELSE 0 END,
-            last_1m_output_tokens = last_1m_output_tokens + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL THEN ?6 ELSE 0 END,
+            last_5h_requests      = last_5h_requests + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL AND usage_statistics.last_5h_reset_at > ?7 THEN 1 ELSE 0 END,
+            last_5h_tokenized_requests = last_5h_tokenized_requests + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL AND usage_statistics.last_5h_reset_at > ?7 AND ?4 THEN 1 ELSE 0 END,
+            last_5h_input_tokens  = last_5h_input_tokens + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL AND usage_statistics.last_5h_reset_at > ?7 THEN ?5 ELSE 0 END,
+            last_5h_output_tokens = last_5h_output_tokens + CASE WHEN usage_statistics.last_5h_reset_at IS NOT NULL AND usage_statistics.last_5h_reset_at > ?7 THEN ?6 ELSE 0 END,
+            last_1w_requests      = last_1w_requests + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL AND usage_statistics.last_1w_reset_at > ?7 THEN 1 ELSE 0 END,
+            last_1w_tokenized_requests = last_1w_tokenized_requests + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL AND usage_statistics.last_1w_reset_at > ?7 AND ?4 THEN 1 ELSE 0 END,
+            last_1w_input_tokens  = last_1w_input_tokens + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL AND usage_statistics.last_1w_reset_at > ?7 THEN ?5 ELSE 0 END,
+            last_1w_output_tokens = last_1w_output_tokens + CASE WHEN usage_statistics.last_1w_reset_at IS NOT NULL AND usage_statistics.last_1w_reset_at > ?7 THEN ?6 ELSE 0 END,
+            last_1m_requests      = last_1m_requests + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL AND usage_statistics.last_1m_reset_at > ?7 THEN 1 ELSE 0 END,
+            last_1m_tokenized_requests = last_1m_tokenized_requests + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL AND usage_statistics.last_1m_reset_at > ?7 AND ?4 THEN 1 ELSE 0 END,
+            last_1m_input_tokens  = last_1m_input_tokens + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL AND usage_statistics.last_1m_reset_at > ?7 THEN ?5 ELSE 0 END,
+            last_1m_output_tokens = last_1m_output_tokens + CASE WHEN usage_statistics.last_1m_reset_at IS NOT NULL AND usage_statistics.last_1m_reset_at > ?7 THEN ?6 ELSE 0 END,
             total_requests      = total_requests + 1,
             total_tokenized_requests = total_tokenized_requests + ?4,
             total_input_tokens  = total_input_tokens + ?5,
@@ -111,7 +111,10 @@ pub(crate) fn record_request(
 }
 
 /// Read all rows, deriving quality/coverage/is_active per window at read time.
-pub(crate) fn query_all(conn: &Connection) -> rusqlite::Result<Vec<ProviderStats>> {
+/// `is_active` requires a FUTURE reset_at: an expired window is ended (the vendor
+/// may never send the "changed reset_at" rollover signal when a window goes idle -
+/// 火山 reports no ResetTime for an idle session - so time itself must retire it).
+pub(crate) fn query_all(conn: &Connection, now: i64) -> rusqlite::Result<Vec<ProviderStats>> {
     let mut stmt = conn.prepare(
         "SELECT provider_id, vendor, provider_type,
             last_5h_requests, last_5h_tokenized_requests, last_5h_input_tokens, last_5h_output_tokens, last_5h_reset_at,
@@ -131,7 +134,7 @@ pub(crate) fn query_all(conn: &Connection) -> rusqlite::Result<Vec<ProviderStats
                 input_tokens: row.get(off + 2)?,
                 output_tokens: row.get(off + 3)?,
                 reset_at: row.get(off + 4)?,
-                is_active: row.get::<_, Option<i64>>(off + 4)?.is_some(),
+                is_active: row.get::<_, Option<i64>>(off + 4)?.map(|r| r > now).unwrap_or(false),
                 quality,
                 coverage_pct,
             })
@@ -229,13 +232,34 @@ mod tests {
     }
 
     #[test]
+    fn expired_window_not_active_and_stops_accumulating() {
+        // 火山 idle-window 场景（用户实测 2026-08-19）：5h 窗口空闲后厂商不再上报
+        // ResetTime（回 0/-1 -> tier.reset_at=None），"reset_at 变化即新周期"的清零
+        // 信号永远不会到来，DB 里留下过期的 reset_at + 旧计数。时间本身证明窗口已
+        // 结束：过期窗口必须 (a) 读取时 is_active=false（UI 不再显示旧计数），
+        // (b) 不再累计新请求（窗口列不加，lifetime 照加）。
+        let conn = mem();
+        record_request(&conn, "p1", "zhipu", "plan", (Some(10), Some(20)), 1000).unwrap();
+        arm_windows(&conn, "p1", Some(1500), None, None).unwrap(); // 5h armed, resets at 1500
+        record_request(&conn, "p1", "zhipu", "plan", (Some(1), Some(2)), 1400).unwrap(); // in-window
+        // Window rolled over at 1500; vendor reports no reset (idle) -> never re-armed.
+        record_request(&conn, "p1", "zhipu", "plan", (Some(5), Some(6)), 2000).unwrap(); // after expiry
+        let s = query_one(&conn, "p1", 2000).unwrap();
+        assert!(!s.last_5h.is_active, "expired window must be inactive");
+        assert_eq!(s.last_5h.requests, 1); // only the in-window request counted
+        assert_eq!(s.last_5h.input_tokens, 1);
+        assert_eq!(s.total_requests, 3); // lifetime sees all three
+        assert_eq!(s.total_input_tokens, 16);
+    }
+
+    #[test]
     fn first_record_creates_row() {
         // Brand-new provider: the upsert INSERT branch must create the row and
         // count the request in totals (spec §Recording — a bare UPDATE would
         // silently lose it).
         let conn = mem();
         record_request(&conn, "p1", "zhipu", "plan", (Some(100), Some(200)), 1000).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.total_requests, 1);
         assert_eq!(s.total_input_tokens, 100);
         assert_eq!(s.total_output_tokens, 200);
@@ -253,7 +277,7 @@ mod tests {
         // tokenized counter does not (quality later derives to RequestsOnly).
         let conn = mem();
         record_request(&conn, "p1", "zhipu", "plan", (None, None), 1000).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.total_requests, 1);
         assert_eq!(s.total_tokenized_requests, 0);
         assert_eq!(s.total_tokens, 0);
@@ -265,7 +289,7 @@ mod tests {
         record_request(&conn, "p1", "zhipu", "plan", (Some(10), Some(20)), 1000).unwrap();
         arm_windows(&conn, "p1", Some(2000), Some(3000), Some(4000)).unwrap();
         record_request(&conn, "p1", "zhipu", "plan", (Some(1), Some(2)), 1500).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         // First request pre-arm is NOT in the window; the armed one is.
         assert_eq!(s.last_5h.requests, 1);
         assert_eq!(s.last_5h.input_tokens, 1);
@@ -283,7 +307,7 @@ mod tests {
         record_request(&conn, "p1", "zhipu", "plan", (Some(10), Some(20)), 1000).unwrap();
         arm_windows(&conn, "p1", Some(2000), None, Some(4000)).unwrap(); // 1w never armed
         record_request(&conn, "p1", "zhipu", "plan", (Some(1), Some(2)), 1500).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.last_1w.requests, 0);
         assert_eq!(s.last_1w.tokenized_requests, 0);
         assert_eq!(s.last_1w.input_tokens, 0);
@@ -296,7 +320,7 @@ mod tests {
         let conn = mem();
         record_request(&conn, "p1", "zhipu", "plan", (None, None), 1000).unwrap();
         record_request(&conn, "p1", "deepseek", "consumption", (None, None), 1001).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.vendor, "deepseek");
         assert_eq!(s.provider_type, "consumption");
     }
@@ -322,8 +346,8 @@ mod tests {
         Ok(())
     }
 
-    pub(crate) fn query_one(conn: &Connection, provider_id: &str) -> rusqlite::Result<ProviderStats> {
-        let mut all = query_all(conn)?;
+    pub(crate) fn query_one(conn: &Connection, provider_id: &str, now: i64) -> rusqlite::Result<ProviderStats> {
+        let mut all = query_all(conn, now)?;
         let found = all.drain(..).find(|s| s.provider_id == provider_id);
         found.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
     }
@@ -348,7 +372,7 @@ mod tests {
         record_request(&conn, "p1", "zhipu", "plan", (Some(1), Some(2)), 1500).unwrap();
         // 5h rolled over: API now reports 20000 instead of 2000.
         update_reset_times_from_usage(&conn, "p1", &snap(vec![("five_hour", Some(20_000))])).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.last_5h.requests, 0);       // zeroed
         assert_eq!(s.last_5h.input_tokens, 0);
         assert_eq!(s.last_5h.reset_at, Some(20_000));
@@ -363,7 +387,7 @@ mod tests {
         arm_windows(&conn, "p1", Some(2000), None, None).unwrap();
         record_request(&conn, "p1", "zhipu", "plan", (Some(3), Some(4)), 1600).unwrap();
         update_reset_times_from_usage(&conn, "p1", &snap(vec![("five_hour", Some(2000))])).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         // Same cycle → nothing zeroed. 1, not 2: the first record ran before the
         // window was armed (Task 1 semantics — unarmed windows guard all columns).
         assert_eq!(s.last_5h.requests, 1);
@@ -378,7 +402,7 @@ mod tests {
         let conn = mem();
         update_reset_times_from_usage(&conn, "ghost", &snap(vec![("five_hour", Some(2000))])).unwrap();
         // Row now exists with the window armed (INSERT-or-UPDATE handles both).
-        let s = query_one(&conn, "ghost").unwrap();
+        let s = query_one(&conn, "ghost", 1000).unwrap();
         assert_eq!(s.last_5h.reset_at, Some(2000));
         assert_eq!(s.last_5h.requests, 0);
         assert_eq!(s.last_5h.is_active, true);
@@ -389,7 +413,7 @@ mod tests {
         let conn = mem();
         record_request(&conn, "p1", "zhipu", "plan", (Some(1), Some(2)), 1500).unwrap();
         update_reset_times_from_usage(&conn, "p1", &snap(vec![("quarterly", Some(9_999))])).unwrap();
-        let s = query_one(&conn, "p1").unwrap();
+        let s = query_one(&conn, "p1", 1000).unwrap();
         assert_eq!(s.last_5h.reset_at, None); // nothing armed by an unknown window
     }
 }

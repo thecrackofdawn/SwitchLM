@@ -211,7 +211,7 @@ fn apply(
             db::update_reset_times_from_usage(conn, &provider_id, &snapshot)
         }
         StatEvent::Query { reply } => {
-            let stats = db::query_all(conn)?;
+            let stats = db::query_all(conn, now)?;
             if let Some(svc) = svc.upgrade() {
                 *svc.last_query.lock().unwrap() = Some(stats.clone());
             }

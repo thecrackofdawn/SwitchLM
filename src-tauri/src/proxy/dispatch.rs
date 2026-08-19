@@ -112,6 +112,19 @@ pub async fn dispatch(
         dispatch_non_stream(&state, &req, protocol, &start_model_id, &echo_model, &req_id, &mut outcome, &now_local).await
     };
 
+    // FallbackExhausted 的 tried 列表对客户端可见(502 body)且会进日志:按 CLAUDE.md 约定
+    // 显示 vendor/上游模型名(model_tag),绝不泄漏换台机器无法反查的内部主键 id。
+    let result = match result {
+        Err(ProxyError::FallbackExhausted { tried, last_error }) => {
+            let mut tags = Vec::with_capacity(tried.len());
+            for id in &tried {
+                tags.push(model_tag(&state, id).await);
+            }
+            Err(ProxyError::FallbackExhausted { tried: tags, last_error })
+        }
+        other => other,
+    };
+
     let ms = start.elapsed().as_millis();
     let served = match &outcome.served_model_id {
         Some(id) => model_tag(&state, id).await,
@@ -1552,6 +1565,64 @@ mod tests {
         assert!(state.health.is_cooling("m_c", 1000));
     }
 
+    /// 错误可读性（CLAUDE.md 约定:日志/错误必须用 vendor + 上游模型名,绝不用内部主键 id）:
+    /// FallbackExhausted 的 `tried` 列表对客户端可见,必须显示 `zhipu/glm-5.3` 这类
+    /// 可识别的 vendor/模型名,而不是 `m_hl1ft5` 这种换台机器就无法反查的内部 id。
+    #[tokio::test]
+    async fn fallback_exhausted_error_lists_model_tags_not_internal_ids() {
+        let mock_a = MockServer::start().await;
+        let mock_b = MockServer::start().await;
+        for m in [&mock_a, &mock_b] {
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({"error":{"code":1302}})))
+                .mount(m).await;
+        }
+        // 与 chain_state 不同:内部 id (m_a/m_b) 与上游模型名 (glm-5.3/glm-4.7) 刻意不同,
+        // 断言才能区分"显示了内部 id"与"显示了模型名"。
+        let mut cfg = AppConfig::default();
+        let secrets = SecretStoreHandle::new(Arc::new(MemoryStore::default()), BackendKind::Keyring);
+        cfg.providers.push(Provider {
+            id: "zhipu".into(), vendor: "zhipu".into(), display_name: "智谱".into(),
+            openai_base_url: Some(mock_a.uri()), anthropic_base_url: None, usage_creds: None,
+        });
+        cfg.providers.push(Provider {
+            id: "pb".into(), vendor: "zhipu".into(), display_name: "智谱2".into(),
+            openai_base_url: Some(mock_b.uri()), anthropic_base_url: None, usage_creds: None,
+        });
+        let mut m_a = mk_model("m_a", "zhipu", Some("m_b"));
+        m_a.upstream_model_id = "glm-5.3".into();
+        cfg.models.push(m_a);
+        let mut m_b = mk_model("m_b", "pb", None);
+        m_b.upstream_model_id = "glm-4.7".into();
+        cfg.models.push(m_b);
+        cfg.profiles.push(Profile {
+            id: "p".into(), name: "glm-5.2".into(), aliases: vec![],
+            backing_model_id: "m_a".into(), ..Default::default()
+        });
+        secrets.set_key("zhipu", "sk-test").unwrap();
+        secrets.set_key("pb", "sk-test").unwrap();
+        let state: AppState = Arc::new(AppStateInner {
+            config: tokio::sync::RwLock::new(cfg), secrets,
+            catalog: Default::default(),
+            health: Default::default(), clock: Arc::new(FakeClock::new(1000)), usage_cache: Default::default(),
+            bound_port: std::sync::Mutex::new(None),
+            server_handle: std::sync::Mutex::new(None),
+            bind_error: std::sync::Mutex::new(None),
+            polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
+            statistics: None,
+        });
+        let app = build_router(state.clone());
+        let resp = app.oneshot(oai_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = body_str(resp).await;
+        assert!(body.contains("zhipu/glm-5.3"), "body should name the first model: {body}");
+        assert!(body.contains("zhipu/glm-4.7"), "body should name the fallback model: {body}");
+        assert!(!body.contains("m_a") && !body.contains("m_b"), "body must not leak internal ids: {body}");
+    }
+
     #[tokio::test]
     async fn non_rate_limit_error_passthrough() {
         let mock_a = MockServer::start().await;
@@ -2019,6 +2090,131 @@ mod tests {
         assert_eq!(s.total_requests, 1);
         assert_eq!(s.total_input_tokens, 25);
         assert_eq!(s.total_output_tokens, 50);
+    }
+
+    /// 智谱 Anthropic-passthrough streaming (verified live 2026-08-19): message_start
+    /// carries a placeholder {"input_tokens": 0, "output_tokens": 0}; the REAL usage
+    /// arrives only in the final message_delta, with cached prompt tokens split out
+    /// into cache_read_input_tokens. The tap must record the summed total (64 + 1152),
+    /// not the frozen placeholder 0 — this is the 35.82M-vs-1.2M undercount regression.
+    #[tokio::test]
+    async fn anthropic_passthrough_stream_records_final_delta_usage_with_cache() {
+        let mock_a = MockServer::start().await;
+        let sse = "event: message_start\n\
+                   data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n\
+                   event: message_delta\n\
+                   data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":64,\"output_tokens\":3,\"cache_read_input_tokens\":1152}}\n\n\
+                   event: message_stop\n\
+                   data: {\"type\":\"message_stop\"}\n\n";
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(sse.as_bytes().to_vec()),
+            )
+            .mount(&mock_a).await;
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        // Anthropic passthrough needs an anthropic_base_url on the provider.
+        let mut cfg = AppConfig::default();
+        let secrets = SecretStoreHandle::new(Arc::new(MemoryStore::default()), BackendKind::Keyring);
+        cfg.providers.push(Provider {
+            id: "zhipu".into(), vendor: "zhipu".into(), display_name: "智谱".into(),
+            openai_base_url: None, anthropic_base_url: Some(mock_a.uri()), usage_creds: None,
+        });
+        cfg.models.push(mk_model("m_a", "zhipu", None));
+        cfg.profiles.push(Profile {
+            id: "p".into(), name: "glm-5.2".into(), aliases: vec![],
+            backing_model_id: "m_a".into(), ..Default::default()
+        });
+        secrets.set_key("zhipu", "sk-test").unwrap();
+        let state_cfg: AppState = Arc::new(AppStateInner {
+                config: tokio::sync::RwLock::new(cfg),
+                catalog: Default::default(),
+                secrets,
+                health: Default::default(),
+                clock: Arc::new(FakeClock::new(1000)),
+                usage_cache: Default::default(),
+                bound_port: std::sync::Mutex::new(None),
+                server_handle: std::sync::Mutex::new(None),
+                bind_error: std::sync::Mutex::new(None),
+                polling_handle: std::sync::Mutex::new(None),
+                last_served_provider: std::sync::Mutex::new(None),
+                recorder: std::sync::RwLock::new(None),
+                statistics: Some(stats),
+            }) as AppState;
+        let app = build_router(state_cfg.clone());
+        let resp = app.oneshot(anthropic_stream_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_str(resp).await; // drain so the tap resolves
+        let s = stats_of(&state_cfg, "zhipu").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 1216); // 64 uncached + 1152 cache_read
+        assert_eq!(s.total_output_tokens, 3);
+    }
+
+    /// 智谱 Anthropic-passthrough NON-stream: cached prompt tokens are split out of
+    /// input_tokens (verified live: input=6 + cache_read=1216 for a 1222-token prompt).
+    #[tokio::test]
+    async fn anthropic_passthrough_non_stream_sums_cache_fields() {
+        let mock_a = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"m1","content":[{"type":"text","text":"OK"}],
+                                   "usage":{"input_tokens":6,"cache_read_input_tokens":1216,"output_tokens":3}}),
+            ))
+            .mount(&mock_a).await;
+        let mut cfg = AppConfig::default();
+        let secrets = SecretStoreHandle::new(Arc::new(MemoryStore::default()), BackendKind::Keyring);
+        cfg.providers.push(Provider {
+            id: "zhipu".into(), vendor: "zhipu".into(), display_name: "智谱".into(),
+            openai_base_url: None, anthropic_base_url: Some(mock_a.uri()), usage_creds: None,
+        });
+        cfg.models.push(mk_model("m_a", "zhipu", None));
+        cfg.profiles.push(Profile {
+            id: "p".into(), name: "glm-5.2".into(), aliases: vec![],
+            backing_model_id: "m_a".into(), ..Default::default()
+        });
+        secrets.set_key("zhipu", "sk-test").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let stats = crate::statistics::UsageStatisticsService::start(dir.path(), Arc::new(FakeClock::new(1000))).unwrap();
+        let state: AppState = Arc::new(AppStateInner {
+            config: tokio::sync::RwLock::new(cfg),
+            catalog: Default::default(),
+            secrets,
+            health: Default::default(),
+            clock: Arc::new(FakeClock::new(1000)),
+            usage_cache: Default::default(),
+            bound_port: std::sync::Mutex::new(None),
+            server_handle: std::sync::Mutex::new(None),
+            bind_error: std::sync::Mutex::new(None),
+            polling_handle: std::sync::Mutex::new(None),
+            last_served_provider: std::sync::Mutex::new(None),
+            recorder: std::sync::RwLock::new(None),
+            statistics: Some(stats),
+        });
+        let app = build_router(state.clone());
+        // Non-stream variant of the anthropic post.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"model":"glm-5.2","stream":false,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]})
+                    .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_str(resp).await;
+        let s = stats_of(&state, "zhipu").await;
+        assert_eq!(s.total_requests, 1);
+        assert_eq!(s.total_input_tokens, 1222); // 6 + 1216
+        assert_eq!(s.total_output_tokens, 3);
     }
 
     #[tokio::test]
