@@ -7,7 +7,6 @@ import {
   NForm,
   NFormItem,
   NInput,
-  NInputNumber,
   NModal,
   NSelect,
   NSpace,
@@ -18,7 +17,7 @@ import { useConfigStore } from "../stores/config";
 import type { Model, ModelSource, Strategy } from "../lib/types";
 import { genId } from "../lib/id";
 import { ellipsisLabel, providerLabel } from "../lib/selectLabel";
-import { recognizedContextSize, setCustomContextSize } from "../lib/commands";
+import { modelCatalogSizes, setCustomContextSize, setCustomOutputSize } from "../lib/commands";
 import draggable from "vuedraggable";
 import { useOrdered } from "../lib/useOrdered";
 
@@ -31,6 +30,29 @@ const { ordered, commit } = useOrdered("switchlm:order:models", () => config.mod
 
 const providerOptions = computed(() => config.providers.map((p) => ({ label: providerLabel(p), value: p.id })));
 
+// ---- catalog size 下拉档位（十进制口径，spec §1；tag 允许输入任意数字）----
+const CONTEXT_SIZE_OPTIONS = [
+  { label: "128K (128000)", value: 128000 },
+  { label: "200K (200000)", value: 200000 },
+  { label: "256K (256000)", value: 256000 },
+  { label: "1M (1000000)", value: 1000000 },
+];
+const OUTPUT_SIZE_OPTIONS = [
+  { label: "8K (8192)", value: 8192 },
+  { label: "32K (32000)", value: 32000 },
+  { label: "64K (64000)", value: 64000 },
+  { label: "128K (128000)", value: 128000 },
+  { label: "256K (256000)", value: 256000 },
+];
+
+/** NSelect tag 输入是字符串：选项点击给 number 直传；tag 字符串 parseInt，NaN 丢弃。 */
+function parseSizeInput(v: number | string | null): number | null {
+  if (v === null) return null;
+  if (typeof v === "number") return v;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ---- edit form ----
 // The user enters the upstream model name (= upstream_model_id).
 // Protocol + base_url are inherited from the provider; the internal id is auto-generated.
@@ -41,6 +63,7 @@ interface FormState {
   source: ModelSource;
   cooldown: number | null;
   context_size: number | null;
+  output_size: number | null;
   // Preserved on edit (fallback is configured on the Fallback page, not this modal);
   // without this, buildModel would reset it to null every time a model is edited.
   fallback_target_model_id: string | null;
@@ -60,6 +83,7 @@ const blank = (): FormState => ({
   source: "manual",
   cooldown: null,
   context_size: null,
+  output_size: null,
   fallback_target_model_id: null,
   fallback_strategies: [],
   fallback_strategies_enabled: true,
@@ -86,6 +110,7 @@ function openEdit(m: Model) {
   form.source = m.source ?? "manual";
   form.cooldown = m.cooldown_seconds ?? null;
   form.context_size = null;
+  form.output_size = null;
   form.fallback_target_model_id = m.fallback_target_model_id ?? null;
   form.fallback_strategies = m.fallback_strategies ?? [];
   form.fallback_strategies_enabled = m.fallback_strategies_enabled ?? true;
@@ -93,7 +118,7 @@ function openEdit(m: Model) {
   form.retry_delay_secs = m.retry_delay_secs ?? 5;
   editing.value = true;
   showModal.value = true;
-  void fetchContextSize();
+  void fetchCatalogSizes();
 }
 
 function buildModel(): Model {
@@ -128,13 +153,23 @@ async function save() {
   }
   try {
     await config.saveModel(buildModel());
-    // context_size is a catalog (vendor+upstream) property, written separately and real-time
-    // (memory + custom_provider_desc.json together). Skip if unchanged from the recognized value.
-    if (form.context_size !== lastRecognized.value) {
+    // catalog sizes are (vendor+upstream) properties, written separately and real-time
+    // (memory + custom_provider_desc.json together). Save-normalization: a value equal to
+    // the bundled default persists as null (clear override) so bundled updates keep applying.
+    const ctx = form.context_size === defaultContext.value ? null : form.context_size;
+    const out = form.output_size === defaultOutput.value ? null : form.output_size;
+    if (form.context_size !== lastRecognized.value || ctx === null) {
       try {
-        await setCustomContextSize(form.provider_id, form.upstream_model_id.trim(), form.context_size);
+        await setCustomContextSize(form.provider_id, form.upstream_model_id.trim(), ctx);
       } catch (e) {
         msg.warning(`上下文大小保存失败：${String(e)}`);
+      }
+    }
+    if (form.output_size !== lastRecognizedOutput.value || out === null) {
+      try {
+        await setCustomOutputSize(form.provider_id, form.upstream_model_id.trim(), out);
+      } catch (e) {
+        msg.warning(`模型最大输出保存失败：${String(e)}`);
       }
     }
     msg.success(editing.value ? "已保存" : "已新增模型");
@@ -188,29 +223,46 @@ watch(() => form.provider_id, (newProviderId) => {
   }
 });
 
-// ---- context size: catalog value for (provider, upstream), edited in-place and written
-// real-time to custom_provider_desc.json via set_custom_context_size. The input shows the
-// effective size (custom override if set, else bundled default); `lastRecognized` gates the
-// save so an unchanged value isn't re-written. ----
+// ---- catalog sizes: effective (override or bundled default, auto-prefilled) for
+// (provider, upstream), edited in-place and written real-time to
+// custom_provider_desc.json via set_custom_context_size / set_custom_output_size.
+// `lastRecognized*` gates the save so unchanged values aren't re-written; `default*` is
+// the bundled value (reset button target + save-normalization reference: a value equal
+// to the default is persisted as null = clear override, so bundled updates keep applying).
 const lastRecognized = ref<number | null>(null);
-async function fetchContextSize() {
+const lastRecognizedOutput = ref<number | null>(null);
+const defaultContext = ref<number | null>(null);
+const defaultOutput = ref<number | null>(null);
+async function fetchCatalogSizes() {
   const pid = form.provider_id;
   const up = form.upstream_model_id.trim();
   if (!pid || !up) {
     form.context_size = null;
+    form.output_size = null;
     lastRecognized.value = null;
+    lastRecognizedOutput.value = null;
+    defaultContext.value = null;
+    defaultOutput.value = null;
     return;
   }
   try {
-    const n = await recognizedContextSize(pid, up);
-    form.context_size = n;
-    lastRecognized.value = n;
+    const s = await modelCatalogSizes(pid, up);
+    form.context_size = s.context_effective;
+    form.output_size = s.output_effective;
+    lastRecognized.value = s.context_effective;
+    lastRecognizedOutput.value = s.output_effective;
+    defaultContext.value = s.context_default;
+    defaultOutput.value = s.output_default;
   } catch {
     form.context_size = null;
+    form.output_size = null;
     lastRecognized.value = null;
+    lastRecognizedOutput.value = null;
+    defaultContext.value = null;
+    defaultOutput.value = null;
   }
 }
-watch(() => [form.provider_id, form.upstream_model_id], fetchContextSize);
+watch(() => [form.provider_id, form.upstream_model_id], fetchCatalogSizes);
 
 function providerName(id: string) {
   const p = config.providers.find((q) => q.id === id);
@@ -266,7 +318,7 @@ onMounted(() => config.loadAll());
         <NFormItem label="账号">
           <NSelect v-model:value="form.provider_id" :options="providerOptions" :render-label="ellipsisLabel" placeholder="选择账号" />
         </NFormItem>
-        <NFormItem label="模型名称（即 upstream_model_id，发给上游）">
+        <NFormItem label="模型名称（即服务商提供的模型）">
           <NSelect
             v-if="availableModels.length && !editing"
             v-model:value="form.upstream_model_id"
@@ -283,16 +335,37 @@ onMounted(() => config.loadAll());
             placeholder="glm-4.6"
           />
         </NFormItem>
-        <NFormItem label="上下文大小（token，目录共享值）">
-          <NInputNumber
-            v-model:value="form.context_size"
-            :min="0"
-            :show-button="false"
-            placeholder="未识别"
-            clearable
-            style="width: 200px"
-          />
-          <span class="muted" style="margin-left: 8px">同厂商共享，清空回退默认</span>
+        <NFormItem label="上下文大小（单位：B）">
+          <NSpace align="center" :size="8" style="width: 100%">
+            <NSelect
+              :value="form.context_size"
+              :options="CONTEXT_SIZE_OPTIONS"
+              :on-update:value="(v: number | string | null) => form.context_size = parseSizeInput(v)"
+              filterable
+              tag
+              clearable
+              placeholder="未识别"
+              style="width: 200px"
+            />
+            <NButton size="tiny" quaternary :disabled="defaultContext === null" @click="form.context_size = defaultContext">重置默认</NButton>
+            <span class="muted">同服务商共享</span>
+          </NSpace>
+        </NFormItem>
+        <NFormItem label="模型最大输出（单位：B）">
+          <NSpace align="center" :size="8" style="width: 100%">
+            <NSelect
+              :value="form.output_size"
+              :options="OUTPUT_SIZE_OPTIONS"
+              :on-update:value="(v: number | string | null) => form.output_size = parseSizeInput(v)"
+              filterable
+              tag
+              clearable
+              placeholder="未收录"
+              style="width: 200px"
+            />
+            <NButton size="tiny" quaternary :disabled="defaultOutput === null" @click="form.output_size = defaultOutput">重置默认</NButton>
+            <span class="muted">同服务商共享</span>
+          </NSpace>
         </NFormItem>
       </NForm>
       <template #footer>
