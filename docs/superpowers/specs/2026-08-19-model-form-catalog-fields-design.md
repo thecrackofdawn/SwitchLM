@@ -19,6 +19,9 @@ Models 页「新增/编辑模型」弹窗中的「上下文大小（token，目�
 - **交互形式**：`NSelect` + `filterable` + `tag` + `clearable`——与同表单「模型名称」字段一致；tag 允许输入目录外任意数字，clearable 保留「清空 = 回退目录默认」语义。
 - **选项来源**：前端静态列表（不动态从目录去重、不加后端查询命令）。
 - **档位**：上下文大小取目录高频档位；输出上限取 output 高频档位（见下）。
+- **预填**：目录（bundled）已收录的模型，两个字段在 fetch 时自动填入具体值（现状 context 已如此，output 对齐；填的是 effective 值 = 覆盖值或 bundled 默认）。
+- **提示与重置**：说明文字「同厂商共享，清空回退默认」简化为「同厂商共享」；每字段旁加「重置默认」按钮——把字段恢复为 **bundled 默认值**，保存时对等于默认值的字段写 null（清除覆盖）而非写入等值覆盖。
+- **读取命令合并**：新增 `model_catalog_sizes` 一次返回两字段的 effective + default 四个值（watch 每次 provider/upstream 变化只发一次 IPC）；替代并删除 `recognized_context_size`（其唯一调用方就是本表单），不再单设 `recognized_output_size`。
 
 ## 设计
 
@@ -69,20 +72,43 @@ const OUTPUT_SIZE_OPTIONS = [
 
 **表单状态**：`FormState` 加 `output_size: number | null`；`blank()` 初始化为 null；`openEdit` 置 null（与 context_size 同样由 fetch 回填）。
 
-**回填**：`fetchContextSize` 改名 `fetchCatalogSizes`，同一个 `[provider_id, upstream_model_id]` watch 触发，同时调用 `recognizedContextSize` 与 `recognizedOutputSize`，分别写入 `form.context_size` / `form.output_size` 与 `lastRecognized` / `lastRecognizedOutput`。
+**回填**：`fetchContextSize` 改名 `fetchCatalogSizes`，同一个 `[provider_id, upstream_model_id]` watch 触发，调用 `modelCatalogSizes(provider_id, upstream)` 一次取回两字段的 effective + default 四个值：
 
-**保存**：`save()` 在现有 context 分支旁加 output 分支——`form.output_size !== lastRecognizedOutput` 时调 `setCustomOutputSize(provider_id, upstream, form.output_size)`；失败 `msg.warning` 不阻断（与 context 分支一致）。
+- `form.context_size = context.effective`、`form.output_size = output.effective`（effective = 覆盖值或 bundled 默认；未收录为 null——即 bundled 已收录的模型自动预填具体值）。
+- `lastRecognized = context.effective`、`lastRecognizedOutput = output.effective`（保存闸门，语义不变）。
+- 另存 `defaultContext = context.default`、`defaultOutput = output.default` 供重置按钮与保存归一使用。
+
+**重置按钮**：每字段旁 `<NButton size="tiny" quaternary :disabled="default === null">重置默认</NButton>`，点击把字段设回 `defaultContext` / `defaultOutput`。说明文字「同厂商共享，清空回退默认」改为「同厂商共享」（重置语义已由按钮承载，"清空回退默认"文案移除；clearable 仍保留——清空后不写覆盖、维持现状回退语义）。
+
+**保存**：`save()` 在现有 context 分支旁加 output 分支——`form.output_size !== lastRecognizedOutput` 时调 `setCustomOutputSize(provider_id, upstream, out)`；失败 `msg.warning` 不阻断（与 context 分支一致）。
+
+**保存归一（重置的落盘语义）**：保存时若字段值 === bundled 默认值，则按 null 传给 set 命令（清除覆盖，bundled 更新继续生效），否则写入显式值：
+
+```ts
+const ctx = form.context_size === defaultContext ? null : form.context_size;
+const out = form.output_size === defaultOutput ? null : form.output_size;
+```
+
+context 分支同规则。用户点"重置默认"后保存 → 值恰为默认 → 落盘为清除覆盖（而不是写入一份等值覆盖）；手输恰好等于默认值的场景同理，语义一致。
 
 ### 2. 后端：命令
 
-`commands.rs` 新增两个命令，与 context 版逐行同构：
+`commands.rs` 新增读取+写入各一（读取合并为单命令，替代现有 `recognized_context_size`）：
 
 ```rust
+#[derive(Serialize)]  // snake_case 字段直出（与现有命令一致，前端 types.ts 手工镜像）
+pub struct CatalogSizes {
+    pub context_effective: Option<u32>, pub context_default: Option<u32>,
+    pub output_effective: Option<u32>,  pub output_default: Option<u32>,
+}
+
 #[tauri::command]
-pub async fn recognized_output_size(
+pub async fn model_catalog_sizes(
     state: State<'_, AppState>, provider_id: String, upstream_model_id: String,
-) -> Result<Option<u32>, String>
-// 实现：config 读锁解析 vendor → catalog 读锁 → catalog.output_size(&vendor, &upstream)
+) -> Result<CatalogSizes, String>
+// 实现：config 读锁解析 vendor → catalog 读锁 → effective 取自 state.catalog
+//       （覆盖值或 bundled 默认），default 取自内嵌 baseline（parse_embedded()）
+//       ——default 需要绕过 custom 覆盖，读"应用自带值"。
 
 #[tauri::command]
 pub async fn set_custom_output_size(
@@ -93,7 +119,9 @@ pub async fn set_custom_output_size(
 //       → effective_catalog → *state.catalog.write() = effective
 ```
 
-`lib.rs` 注册两个命令。
+`lib.rs`：注册 `model_catalog_sizes`、`set_custom_output_size`；**删除 `recognized_context_size`**（唯一调用方是本表单，由新命令取代）。
+
+`default` 的实现细节：baseline 直读 `parse_embedded()`。每次调用重新解析内嵌 JSON 有微开销（<1ms 量级、每键入一次 watch 触发一次），可接受；不做缓存（避免引入与 `state.catalog` 平行的第二份状态）。`parse_embedded` 目前是私有 fn，需提为 `pub(crate)`。
 
 ### 3. 后端：catalog.rs
 
@@ -119,8 +147,8 @@ pub async fn set_custom_output_size(
 
 ## 错误处理
 
-- `setCustomOutputSize` 失败：`msg.warning("模型最大输出保存失败：...")`，不阻断保存流程（与 context 一致）。
-- `recognizedOutputSize` 失败（如 provider 不存在）：字段置 null、占位符显示，不报错（与现状 `fetchContextSize` 的 catch 一致）。
+- `setCustomOutputSize` / `setCustomContextSize` 失败：`msg.warning`，不阻断保存流程（与现状一致）。
+- `modelCatalogSizes` 失败（如 provider 不存在）：两字段置 null、占位符显示，不报错（与现状 `fetchContextSize` 的 catch 一致）。
 - tag 输入非数字：静默忽略（不更新值）。
 - custom 文件损坏：`load_custom` 现有行为（warn + 空 catalog）不变。
 
@@ -133,17 +161,17 @@ pub async fn set_custom_output_size(
 - `set_context_size` None：条目有 output 覆盖 → 置 context=0 保留条目；无 → 删整条（现有测试 `set_context_size_adds_updates_removes` 需相应更新：其条目无 output 覆盖，行为不变）。
 - `overlay_custom`：custom 条目 context=0 → baseline context 保留；context=0 且 baseline 无该条目 → 合并且 `context_size()` 返回 None。
 - `context_size()`：条目存在但值为 0 → 返回 None。
-- `commands.rs`：两个新命令的 round-trip（临时目录 + 内存 state，参照 `set_custom_context_size` 的测试模式；若无现成模式则补最小 set→recognized 往返）。
+- `commands.rs`：`model_catalog_sizes`（effective vs default 分离、custom 覆盖各态）与 `set_custom_output_size`（set→再读 round-trip；临时目录 + 内存 state，参照 `set_custom_context_size` 的测试模式；若无现成模式则补最小往返）。
 
 **前端**：
 
 - `pnpm exec vue-tsc --noEmit` 类型检查。
-- 人工验证：新增模型（选档位/手输/清空）、编辑已有模型回填、自定义模型 output 覆盖后 OpenCode 同步生效（若开启同步）。
+- 人工验证：新增模型（bundled 模型预填、选档位/手输/清空）、编辑已有模型回填、重置默认按钮（有/无 bundled 默认两态）、自定义模型 output 覆盖后 OpenCode 同步生效（若开启同步）。
 
 ## 实施顺序（供 plan 参考）
 
-1. `catalog.rs`：`set_output_size` + `overlay_custom` 哨兵规则 + `set_context_size` None 分支修正 + 测试
-2. `commands.rs` + `lib.rs`：两个新命令 + 注册 + 测试
-3. `commands.ts`：两个 wrapper
-4. `Models.vue`：两字段 UI + 解析函数 + fetch/save 扩展
+1. `catalog.rs`：`set_output_size` + `overlay_custom` 哨兵规则 + `set_context_size` None 分支修正 + `context_size()` 语义修正 + 测试
+2. `commands.rs` + `lib.rs`：`model_catalog_sizes` + `set_custom_output_size` + 注册 + 删除 `recognized_context_size` + 测试
+3. `commands.ts`：`modelCatalogSizes`、`setCustomOutputSize` wrapper；删 `recognizedContextSize`
+4. `Models.vue`：两字段 UI（含重置按钮）+ 解析函数 + fetch/save 扩展
 5. 全量验证：`cargo test` + `pnpm exec vue-tsc --noEmit`
