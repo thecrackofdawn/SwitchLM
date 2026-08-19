@@ -16,8 +16,8 @@ pub struct AppStateInner {
     pub config: RwLock<AppConfig>,
     /// Bundled provider catalog overlaid with user customizations from
     /// custom_provider_desc.json. Real-time mutable via `set_custom_context_size`
-    /// (write lock); readers (`recognized_context_size`, `classify_fallback`) take
-    /// the read lock.
+    /// / `set_custom_output_size` (write lock); readers (`get_provider_usage_url`,
+    /// `classify_fallback`, `model_catalog_sizes`) take the read lock.
     pub catalog: RwLock<ProviderCatalog>,
     pub secrets: SecretStoreHandle,
     /// Per-model circuit-breaker state (runtime-only, not persisted).
