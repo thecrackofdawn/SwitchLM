@@ -45,12 +45,24 @@ const OUTPUT_SIZE_OPTIONS = [
   { label: "256K (256000)", value: 256000 },
 ];
 
-/** NSelect tag 输入是字符串：选项点击给 number 直传；tag 字符串 parseInt，NaN 丢弃。 */
-function parseSizeInput(v: number | string | null): number | null {
-  if (v === null) return null;
-  if (typeof v === "number") return v;
-  const n = Number.parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
+/** NSelect 值更新统一走这里（spec 错误处理：tag 输入非法时静默忽略，不更新字段）：
+ *  null = 清空按钮 → 置空（清空 = 回退目录默认）；number = 档位点击直传；
+ *  string = tag 手输 → 剔除千分位/空白后必须是纯数字（拒绝负数/小数/非数字），
+ *  非法输入直接 return，字段保持原值——若置 null 会在保存时落盘清除覆盖。 */
+function makeSizeHandler(field: "context_size" | "output_size") {
+  return (v: number | string | null) => {
+    if (v === null) {
+      form[field] = null;
+      return;
+    }
+    if (typeof v === "number") {
+      form[field] = v;
+      return;
+    }
+    const s = v.replace(/[,_\s]/g, "");
+    if (!/^\d+$/.test(s)) return;
+    form[field] = Number.parseInt(s, 10);
+  };
 }
 
 // ---- edit form ----
@@ -340,7 +352,7 @@ onMounted(() => config.loadAll());
             <NSelect
               :value="form.context_size"
               :options="CONTEXT_SIZE_OPTIONS"
-              :on-update:value="(v: number | string | null) => form.context_size = parseSizeInput(v)"
+              :on-update:value="makeSizeHandler('context_size')"
               filterable
               tag
               clearable
@@ -356,7 +368,7 @@ onMounted(() => config.loadAll());
             <NSelect
               :value="form.output_size"
               :options="OUTPUT_SIZE_OPTIONS"
-              :on-update:value="(v: number | string | null) => form.output_size = parseSizeInput(v)"
+              :on-update:value="makeSizeHandler('output_size')"
               filterable
               tag
               clearable
